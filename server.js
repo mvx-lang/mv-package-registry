@@ -78,14 +78,19 @@ const SECRET = (() => {
 // ---- packages --------------------------------------------------------
 function loadPackages() {
   const out = [];
-  let names; try { names = fs.readdirSync(REGDIR); } catch { return out; }
-  for (const name of names) {
-    if (name[0] === '_' || name[0] === '.') continue;
-    try {
-      const meta = JSON.parse(fs.readFileSync(path.join(REGDIR, name, 'meta.json'), 'utf8'));
-      if (meta && meta.name) out.push(meta);
-    } catch { /* not a package dir */ }
-  }
+  const scan = (rel) => {
+    let names; try { names = fs.readdirSync(path.join(REGDIR, rel || '.')); } catch { return; }
+    for (const n of names) {
+      if (n[0] === '_' || n[0] === '.') continue;
+      const full = rel ? rel + '/' + n : n;
+      try {                                            // a package here?
+        const meta = JSON.parse(fs.readFileSync(path.join(REGDIR, full, 'meta.json'), 'utf8'));
+        if (meta && meta.name) { out.push(meta); continue; }
+      } catch { /* not a package dir */ }
+      if (!rel) { try { if (fs.statSync(path.join(REGDIR, full)).isDirectory()) scan(full); } catch {} }
+    }
+  };
+  scan('');                                            // scope dirs recursed one level
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
 }
@@ -205,7 +210,11 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-const okName = n => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(n) && n[0] !== '_' && n[0] !== '.';
+// Package names may be scoped, Composer/npm style: <scope>/<name> (one level)
+// or bare <name>.  Each segment starts alphanumeric (so _auth/.foo are out).
+const NAMESEG = '[A-Za-z0-9][A-Za-z0-9._-]*';
+const RE_NAME = new RegExp(`^(${NAMESEG}\\/)?${NAMESEG}$`);
+const okName = n => RE_NAME.test(String(n));
 const okUser = n => /^[a-z0-9][a-z0-9_-]{1,31}$/i.test(n);
 const okEmail = e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e);
 function readBody(req, cb) {
@@ -353,7 +362,8 @@ function publish(req, res, q) {
 
   readBody(req, buf => {
     if (!buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz)' });
-    const dir = path.join(REGDIR, name), tarName = `${name}-${version}.tar.gz`;
+    const base = name.split('/').pop();                // tar filename uses the last segment
+    const dir = path.join(REGDIR, name), tarName = `${base}-${version}.tar.gz`;
     const sysRaw = field('x-pkg-systems', 'systems');
     const meta = {
       name, version, owner: ownerName,
@@ -487,14 +497,17 @@ const server = http.createServer((req, res) => {
     return sendJSON(res, 200, { challenge: ch, rpId, allowCredentials: allow, userVerification: 'preferred', timeout: 6e4 });
   }
   if (parts[0] === 'p' && parts[1]) {
-    if (!okName(parts[1])) { res.writeHead(400); return res.end('bad name'); }
-    const html = pkgPage(parts[1], user);
+    const nm = parts.slice(1).join('/');               // scoped: /p/<scope>/<name>
+    if (!okName(nm)) { res.writeHead(400); return res.end('bad name'); }
+    const html = pkgPage(nm, user);
     return html ? sendHTML(res, 200, html) : sendHTML(res, 404, page('not found', '<div class="empty">No such package.</div>', user));
   }
 
   // JSON API
   if (parts[0] === 'package' && parts[1]) {
-    const meta = loadPackage(parts[1]);
+    const nm = parts.slice(1).join('/');               // scoped: /package/<scope>/<name>
+    if (!okName(nm)) return sendJSON(res, 404, { error: 'not found' });
+    const meta = loadPackage(nm);
     return meta ? sendJSON(res, 200, meta) : sendJSON(res, 404, { error: 'not found' });
   }
   if (parts[0] === 'search') {
