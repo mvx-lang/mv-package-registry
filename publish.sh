@@ -5,8 +5,8 @@
 # "binary:<system>:<os>:<arch>:<endian>" — os ("linux"/"windows"/"aix") and
 # arch ("x86_64", ...) for native objects, or both "any" when the binary ships
 # no native code; endian ("le"/"be") for the compiled BASIC objects + data
-# files.  Set MVPKG_PUBLISH_TOKEN if the registry requires a token.
-# GPL-2.0-only.
+# files.  Set MVPKG_PUBLISH_TOKEN if the registry requires a token, and
+# MVPKG_LICENSE for the SPDX licence (e.g. "GPL-2.0-only").  GPL-2.0-only.
 set -e
 URL="${1:?usage: publish.sh <url> <tar> <name> <version> [desc] [deps] [systems] [artifact]}"
 TAR="${2:?tarball required}"; NAME="${3:?name required}"; VER="${4:?version required}"
@@ -15,6 +15,7 @@ curl -sf -X POST "$URL/publish" \
   ${MVPKG_PUBLISH_TOKEN:+-H "X-Auth-Token: $MVPKG_PUBLISH_TOKEN"} \
   -H "X-Pkg-Name: $NAME" -H "X-Pkg-Version: $VER" \
   -H "X-Pkg-Description: $DESC" -H "X-Pkg-Dependencies: $DEPS" -H "X-Pkg-Systems: $SYS" \
+  ${MVPKG_LICENSE:+-H "X-Pkg-License: $MVPKG_LICENSE"} \
   ${ART:+-H "X-Pkg-Artifact: $ART"} \
   --data-binary @"$TAR"
 echo

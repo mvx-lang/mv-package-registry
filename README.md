@@ -8,6 +8,27 @@ builder image. Split out of the client repo so people installing the
 
 Live at **https://mv-package.heydon.io**.
 
+## The package manifest (`mvpkg.json`)
+
+A package declares its metadata in a JSON manifest at its root:
+
+```json
+{
+  "name": "mv-lang/curses",
+  "version": "1.0",
+  "description": "ncurses terminal handling for UniData",
+  "license": "GPL-2.0-only",
+  "systems": ["udt"],
+  "dependencies": ["mv-lang/cmd"]
+}
+```
+
+`license` is an [SPDX identifier](https://spdx.org/licenses/) (e.g.
+`GPL-2.0-only`, `MIT`, or `LicenseRef-Commercial` for a proprietary package).
+The builder reads it and passes it through publish (`X-Pkg-License`); the
+registry stores and displays it. A version whose artifacts include no `source`
+is shown as **binary only** — the intended shape for commercial packages.
+
 ## The registry (`server.js`)
 
 A dependency-free Node.js registry and website. Packages live under

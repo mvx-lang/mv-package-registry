@@ -290,7 +290,8 @@ function homePage(q, user) {
     return page('mv_package', search + `<div class="empty">${all.length ? 'No packages match your search.' : 'No packages published yet.'}</div>`, user);
   const cards = list.map(p => {
     const sys = (p.systems && p.systems.length) ? p.systems.map(s => `<span class="badge">${esc(s)}</span>`).join('') : '';
-    return `<a class="card" href="/p/${esc(p.name)}" style="display:block"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span>${sys}</h3><p>${esc(p.description || '')}</p></a>`;
+    const lic = p.license ? `<span class="badge">${esc(p.license)}</span>` : '';
+    return `<a class="card" href="/p/${esc(p.name)}" style="display:block"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span>${sys}${lic}</h3><p>${esc(p.description || '')}</p></a>`;
   }).join('');
   return page('mv_package', search + cards, user);
 }
@@ -315,10 +316,14 @@ function pkgPage(name, user) {
         `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : 'source')}</a></p>`).join('')
     : (p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '');
   const owner = p.owner ? `<p class="meta"><b>Owner:</b> ${esc(p.owner)}</p>` : '';
+  const license = `<p class="meta"><b>Licence:</b> ${p.license ? esc(p.license) : '<span class="meta">unspecified</span>'}</p>`;
+  // A version whose artifacts include no "source" is binary-only (commercial).
+  const binaryOnly = p.artifacts && p.artifacts.length && !p.artifacts.some(a => a.kind === 'source');
+  const dist = `<p class="meta"><b>Distribution:</b> ${binaryOnly ? 'binary only — no source' : 'source included'}</p>`;
   return page(`${p.name} — mv_package`,
     `<div class="card"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span></h3><p>${esc(p.description || '')}</p></div>
      <h3>Install</h3><pre>MVPKG install ${esc(p.name)}</pre>
-     <p class="meta"><b>Dependencies:</b> ${depsHtml}</p><p class="meta"><b>Systems:</b> ${esc(sys)}</p>${owner}${tar}
+     <p class="meta"><b>Dependencies:</b> ${depsHtml}</p><p class="meta"><b>Systems:</b> ${esc(sys)}</p>${license}${dist}${owner}${tar}
      <p style="margin-top:22px"><a href="/">&larr; all packages</a></p>`, user);
 }
 
@@ -430,10 +435,13 @@ function publish(req, res, q) {
 
     // Merge artifacts into the same version; a new version starts fresh.
     let meta = (existing && existing.version === version) ? existing
-      : { name, version, owner: ownerName, description: '', dependencies: '', systems: [], artifacts: [], tarball: '', published: Date.now() };
+      : { name, version, owner: ownerName, description: '', dependencies: '', license: '', systems: [], artifacts: [], tarball: '', published: Date.now() };
     meta.owner = ownerName;
     const desc = field('x-pkg-description', 'description'); if (desc) meta.description = desc;
     const deps = field('x-pkg-dependencies', 'dependencies'); if (deps) meta.dependencies = deps;
+    // SPDX licence (e.g. "GPL-2.0-only", "LicenseRef-Commercial").  Author-set
+    // via the manifest; the registry may fill it from a linked GitHub repo.
+    const lic = field('x-pkg-license', 'license'); if (lic) meta.license = lic;
 
     const art = kind === 'binary'
       ? { kind, system: aSystem, os: aOs, arch: aArch, endian: aEndian, tarball }
@@ -480,9 +488,13 @@ function selectArtifact(meta, system, os, arch, endian) {
     const chosen = native || bins[0] || meta.artifacts.find(a => a.kind === 'source');
     if (chosen) { tarball = chosen.tarball; selected = chosen.kind; }
   }
+  // binary-only = this version ships no source artifact (the commercial case).
+  const sourceIncluded = !meta.artifacts || !meta.artifacts.length
+    || meta.artifacts.some(a => a.kind === 'source');
   return {
     name: meta.name, version: meta.version, tarball,
     description: meta.description || '', dependencies: meta.dependencies || '',
+    license: meta.license || '', sourceIncluded,
     systems: meta.systems || [], owner: meta.owner, selected,
   };
 }

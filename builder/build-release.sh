@@ -17,6 +17,18 @@ NAME="${1:?usage: build-release.sh <name> <version> [deps] [description]}"
 VER="${2:?version required}"
 DEPS="${3:-}"
 DESC="${4:-built by udt-builder}"
+
+# Prefer the package's JSON manifest (mvpkg.json) for description, licence and
+# dependencies when present — it is the authoritative, author-declared source;
+# the positional args are the fallback.  (name/version identify the release
+# being cut and stay as args.)
+if [ -f /pkg/mvpkg.json ] && command -v python3 >/dev/null 2>&1; then
+  jget() { python3 -c "import json;d=json.load(open('/pkg/mvpkg.json'));v=d.get('$1','');print(' '.join(v) if isinstance(v,list) else v)"; }
+  M="$(jget description)" ; [ -n "$M" ] && DESC="$M"
+  M="$(jget dependencies)" ; [ -n "$M" ] && DEPS="$M"
+  M="$(jget license)" ; [ -n "$M" ] && export MVPKG_LICENSE="$M"
+  echo ">> manifest mvpkg.json: licence=${MVPKG_LICENSE:-unset} deps=${DEPS:-none}"
+fi
 SYSTEM="${MVPKG_SYSTEM:-udt}"
 ARCH="$(uname -m)"
 # Operating system of this builder — native objects are OS-locked (ELF vs DLL
