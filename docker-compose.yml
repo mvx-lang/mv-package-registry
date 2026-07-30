@@ -13,6 +13,7 @@ services:
       - ./data:/data                # published packages persist here
     environment:
       - MVPKG_PUBLISH_TOKEN=${MVPKG_PUBLISH_TOKEN:?set MVPKG_PUBLISH_TOKEN in .env}
+      - MVPKG_ADMIN_USERS=${MVPKG_ADMIN_USERS:-}   # comma-separated admin usernames
     networks:
       - proxy
 networks:
