@@ -32,6 +32,11 @@ const AUTHDIR = path.join(REGDIR, '_auth');       // no meta.json -> skipped as 
 const USERDIR = path.join(AUTHDIR, 'users');
 const PORT = Number(process.argv[2] || process.env.MVPKG_PORT || 8080);
 const ADMIN_TOKEN = process.env.MVPKG_PUBLISH_TOKEN || '';   // optional admin publish
+// Config-driven admins: any registered user whose name is listed here is an
+// admin (can publish to / manage any package).  Bootstraps the first admin
+// without anyone having to set a password on their behalf.
+const ADMIN_USERS = (process.env.MVPKG_ADMIN_USERS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const isAdminUser = u => u && ADMIN_USERS.includes(String(u.username).toLowerCase());
 fs.mkdirSync(USERDIR, { recursive: true });
 
 // Server secret for signing session cookies — generated once, persisted.
@@ -245,8 +250,9 @@ function accountPage(user, opts) {
     ? `<div class="msg ok">New token — copy it now, it won't be shown again:</div><div class="tok">${esc(opts.freshToken)}</div>
        <p class="meta">Publish with it: <code>MVPKG_PUBLISH_TOKEN=&lt;token&gt; publish.sh …</code></p>`
     : '';
+  const adminBadge = isAdminUser(user) ? ' <span class="badge" style="border-color:var(--acc);color:var(--acc)">admin</span>' : '';
   return page('Account — mv_package',
-    `<h3>Signed in as ${esc(user.username)}</h3>
+    `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
      <h3 style="margin-top:24px">Your packages</h3>${pkgs}
      <h3 style="margin-top:24px">Publish tokens</h3>${fresh}${toks}
      <form method="post" action="/account/tokens" style="margin-top:14px">
@@ -260,17 +266,19 @@ function publish(req, res, q) {
   const h = req.headers;
   const field = (hk, qk) => (h[hk] != null ? String(h[hk]) : String(q[qk] || ''));
   const tok = h['x-auth-token'] || q.token || '';
-  const isAdmin = ADMIN_TOKEN && tok === ADMIN_TOKEN;
-  const user = isAdmin ? null : findUserByToken(tok);
+  const user = findUserByToken(tok);
+  const isAdmin = (ADMIN_TOKEN && tok === ADMIN_TOKEN) || isAdminUser(user);
   if (!isAdmin && !user) return sendJSON(res, 401, { error: 'bad or missing token (see /account)' });
 
   const name = field('x-pkg-name', 'name'), version = field('x-pkg-version', 'version');
   if (!okName(name) || !version) return sendJSON(res, 400, { error: 'valid name and version required' });
 
   const existing = loadPackage(name);
-  const ownerName = user ? user.username : (existing && existing.owner) || field('x-pkg-owner', 'owner') || 'admin';
-  if (existing && existing.owner && !isAdmin && existing.owner !== ownerName)
+  const publisher = user ? user.username : null;
+  if (existing && existing.owner && !isAdmin && existing.owner !== publisher)
     return sendJSON(res, 403, { error: `package "${name}" is owned by ${existing.owner}` });
+  // preserve the owner on re-publish; a new package is owned by its publisher
+  const ownerName = (existing && existing.owner) || publisher || field('x-pkg-owner', 'owner') || 'admin';
 
   readBody(req, buf => {
     if (!buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz)' });
