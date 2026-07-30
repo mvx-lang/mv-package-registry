@@ -53,14 +53,26 @@ Traefik that terminates TLS for `mv-package.heydon.io`.
 
 ## Build + publish a release
 
+A release can carry more than one artifact for the same version: a portable
+**source** tar plus one **binary** tar per `system`/`arch` (the native bridge
+precompiled to `.o`, so the client installs it without a compiler). The
+`X-Pkg-Artifact` header tags each upload — `source` (default) or
+`binary:<system>:<arch>`:
+
 ```sh
 ./mkrelease.sh /path/to/account <name> <version> "<description>" [deps]
-./publish.sh https://mv-package.heydon.io <tar> <name> <version> "<desc>" [deps] [systems]
+./publish.sh https://mv-package.heydon.io <tar> <name> <version> "<desc>" [deps] [systems] [artifact]
 ```
 
+`GET /package/<name>` returns the source tar by default and the matching
+binary when the client sends `?system=<sys>&arch=<arch>` (the `MVPKG` client
+does this automatically from its `MVPKGOS "PLATFORM"` op). The website
+package page lists every artifact.
+
 For UniData packages whose native bridge must compile, `builder/` is a
-disposable UniData image that validates the build and produces a release tar
-— see [`builder/README.md`](builder/README.md).
+disposable UniData image that builds **both** artifacts (source + a binary
+for the builder's `system`/`$(uname -m)`) and publishes them — see
+[`builder/README.md`](builder/README.md).
 
 ## Test
 
@@ -90,6 +102,10 @@ The registry is growing from a file-backed service into an application:
   GitHub API (`GITHUB_TOKEN` for private/rate-limits) as a fallback. The
   latest release shows on the account page. Dependency-free
   ([`lib/github.js`](lib/github.js)).
+- **Multi-artifact releases** — **done.** A release version carries a source
+  tar plus a binary tar per `system`/`arch`; `builder/build-release.sh` builds
+  and publishes both, and the `MVPKG` client fetches the binary matching its
+  platform (falling back to source). See "Build + publish a release" above.
 - **Release deployment** — let `mv_package` deploy selected releases: choose
   which monitored releases become registry packages (built via `builder/`
   where native code is involved) and publish them.
