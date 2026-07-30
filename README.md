@@ -29,6 +29,40 @@ The builder reads it and passes it through publish (`X-Pkg-License`); the
 registry stores and displays it. A version whose artifacts include no `source`
 is shown as **binary only** — the intended shape for commercial packages.
 
+### The `deploy` block
+
+`MVPKG install` **globally catalogs** every program in the package's `BP` (so
+subroutines are callable from any account), then **deploys** it into the current
+account. The `deploy` block declares what is account-specific — the client
+infers nothing:
+
+```json
+{
+  "name": "mv-lang/git",
+  "dependencies": ["mv-lang/cmd"],
+  "deploy": {
+    "verbs": ["GIT"],
+    "fallback": { "cmd": ["CMD.BP"] }
+  }
+}
+```
+
+- **`verbs`** — programs that get a per-account `VOC` verb pointer on deploy
+  (so they're typeable at TCL). Everything else in `BP` is a subroutine, global
+  and needs no per-account entry.
+- **`files`** — account data files created on deploy: `[{ "name": …, "type":
+  "dir" | "hashed" }]`. e.g. `mvpkg` declares its `mvpkg.installed` manifest
+  file; `git` needs none (it makes its repo on demand).
+- **`fallback`** — `{ "<dep>": ["<dir>", …] }`: catalog those extra `*.BP`
+  source dirs **only if** the named dependency is not available. `git` bundles a
+  copy of `cmd` in `CMD.BP` and lists `{"cmd": ["CMD.BP"]}`, so the bundle is
+  cataloged only when `cmd` itself isn't — otherwise the real `cmd` owns
+  `CMD.*`.
+
+Install downloads once (recorded in a system-level manifest); rerun `MVPKG
+install <name>` in another account and it detects the global install and just
+deploys into that account.
+
 ## The registry (`server.js`)
 
 A dependency-free Node.js registry and website. Packages live under
