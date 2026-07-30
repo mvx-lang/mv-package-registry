@@ -295,6 +295,14 @@ function homePage(q, user) {
   return page('mv_package', search + cards, user);
 }
 
+// Human label for a binary artifact: arch-locked -> "udt/x86_64 (binary)";
+// endian-locked (arch: any) -> "udt le, any CPU (binary)".
+function artLabel(a) {
+  const archLocked = a.arch && a.arch !== 'any';
+  const where = archLocked ? `${a.system}/${a.arch}` : `${a.system} ${a.endian || '?'}, any CPU`;
+  return `${where} (binary)`;
+}
+
 function pkgPage(name, user) {
   const p = loadPackage(name);
   if (!p) return null;
@@ -303,7 +311,7 @@ function pkgPage(name, user) {
   const sys = (p.systems && p.systems.length) ? p.systems.map(esc).join(', ') : 'any';
   const tar = (p.artifacts && p.artifacts.length)
     ? '<p class="meta"><b>Artifacts:</b></p>' + p.artifacts.map(a =>
-        `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? a.system + '/' + a.arch + ' (binary)' : 'source')}</a></p>`).join('')
+        `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : 'source')}</a></p>`).join('')
     : (p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '');
   const owner = p.owner ? `<p class="meta"><b>Owner:</b> ${esc(p.owner)}</p>` : '';
   return page(`${p.name} — mv_package`,
@@ -401,10 +409,15 @@ function publish(req, res, q) {
   // preserve the owner on re-publish; a new package is owned by its publisher
   const ownerName = (existing && existing.owner) || publisher || field('x-pkg-owner', 'owner') || 'admin';
 
-  // Which artifact this upload is: "source" (default) or "binary:<system>:<arch>".
-  const [aKind, aSystem, aArch] = String(field('x-pkg-artifact', 'artifact') || 'source').split(':');
-  const kind = aKind === 'binary' ? 'binary' : 'source';
-  const suffix = kind === 'binary' ? `${aSystem || 'any'}-${aArch || 'any'}` : 'source';
+  // Which artifact this upload is: "source" (default) or
+  // "binary:<system>:<endian>:<arch>".  Compiled BASIC objects + data files
+  // are locked to endianness; native code is locked to arch.  arch = "any"
+  // marks an endian-locked (arch-agnostic) binary — portable across CPUs of
+  // the same endianness; a real arch (e.g. x86_64) marks an arch-locked one.
+  const aParts = String(field('x-pkg-artifact', 'artifact') || 'source').split(':');
+  const kind = aParts[0] === 'binary' ? 'binary' : 'source';
+  const aSystem = aParts[1] || 'any', aEndian = aParts[2] || 'any', aArch = aParts[3] || 'any';
+  const suffix = kind === 'binary' ? `${aSystem}-${aEndian}-${aArch}` : 'source';
 
   readBody(req, buf => {
     if (!buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz)' });
@@ -421,9 +434,9 @@ function publish(req, res, q) {
     const deps = field('x-pkg-dependencies', 'dependencies'); if (deps) meta.dependencies = deps;
 
     const art = kind === 'binary'
-      ? { kind, system: aSystem || 'any', arch: aArch || 'any', tarball }
+      ? { kind, system: aSystem, endian: aEndian, arch: aArch, tarball }
       : { kind: 'source', tarball };
-    meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.arch === art.arch));
+    meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.endian === art.endian && a.arch === art.arch));
     meta.artifacts.push(art);
     const src = meta.artifacts.find(a => a.kind === 'source');
     meta.tarball = src ? src.tarball : tarball;        // default (unselected) = source
@@ -450,12 +463,19 @@ function publish(req, res, q) {
 // per-artifact listing lives on the website page (/p/<name>), which reads the
 // raw meta.  With a system+arch that matches a binary, serve it; otherwise the
 // source tar.
-function selectArtifact(meta, system, arch) {
+function selectArtifact(meta, system, arch, endian) {
   let tarball = meta.tarball, selected = 'source';
   if (system && meta.artifacts && meta.artifacts.length) {
-    const bin = meta.artifacts.find(a => a.kind === 'binary' && a.system === system && (!arch || a.arch === arch));
-    const src = meta.artifacts.find(a => a.kind === 'source');
-    const chosen = bin || src;
+    // Eligible binaries: same system, endian matches (both objects and native
+    // code are endian-consistent), and either arch-agnostic ("any") or the
+    // caller's arch.  Prefer an arch-locked binary over an endian-locked one.
+    const bins = meta.artifacts.filter(a => a.kind === 'binary'
+      && a.system === system
+      && (!endian || !a.endian || a.endian === 'any' || a.endian === endian)
+      && (!a.arch || a.arch === 'any' || a.arch === arch));
+    const chosen = bins.find(a => a.arch && a.arch !== 'any')  // arch-locked (most specific)
+                || bins[0]                                      // endian-locked (arch: any)
+                || meta.artifacts.find(a => a.kind === 'source');
     if (chosen) { tarball = chosen.tarball; selected = chosen.kind; }
   }
   return {
@@ -625,7 +645,7 @@ const server = http.createServer((req, res) => {
     const meta = loadPackage(nm);
     if (!meta) return sendJSON(res, 404, { error: 'not found' });
     // ?system=&arch= -> tarball resolved to the best matching artifact
-    return sendJSON(res, 200, selectArtifact(meta, u.query.system, u.query.arch));
+    return sendJSON(res, 200, selectArtifact(meta, u.query.system, u.query.arch, u.query.endian));
   }
   if (parts[0] === 'search') {
     const qs = String(u.query.q || '').toLowerCase();

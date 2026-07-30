@@ -19,27 +19,41 @@ DEPS="${3:-}"
 DESC="${4:-built by udt-builder}"
 SYSTEM="${MVPKG_SYSTEM:-udt}"
 ARCH="$(uname -m)"
+# Endianness of this builder — the axis for compiled BASIC objects + data
+# files (native code is keyed by arch instead).  0201 = little, 0102 = big.
+case "$(printf '\1\2' | od -An -tx2 | tr -d ' \n')" in
+  0201*) ENDIAN=le ;; 0102*) ENDIAN=be ;; *) ENDIAN=le ;;
+esac
 : "${MVPKG_REGISTRY:?set MVPKG_REGISTRY (e.g. https://mv-package.heydon.io)}"
 OUT=/out ; mkdir -p "$OUT"
 SAFE="$(printf '%s' "$NAME" | tr '/' '_')"       # scoped names carry a slash
-SRC="$OUT/$SAFE-$VER-source.tar.gz"
-BIN="$OUT/$SAFE-$VER-$SYSTEM-$ARCH.tar.gz"
 
-echo ">> building $NAME $VER  (source + $SYSTEM/$ARCH binary)"
+# A binary with native objects is locked to arch; a pure BASIC/data binary is
+# locked only to endianness (arch "any", portable across same-endian CPUs).
+if ls /pkg/udt-callc/*.c >/dev/null 2>&1; then
+  BARCH="$ARCH" ; NATIVE=1
+else
+  BARCH=any ; NATIVE=0
+fi
+SRC="$OUT/$SAFE-$VER-source.tar.gz"
+BIN="$OUT/$SAFE-$VER-$SYSTEM-$ENDIAN-$BARCH.tar.gz"
+
+echo ">> building $NAME $VER  (source + $SYSTEM/$ENDIAN/$BARCH binary)"
 
 # --- source artifact: the package exactly as authored -----------------------
 tar czf "$SRC" --exclude='.git' --exclude='./out' -C /pkg .
 
-# --- binary artifact: native bridge precompiled for this system/arch --------
-# Compile udt-callc/*.c to .o in a staging copy, then drop the .c so the
-# shipped tar carries objects the client links without a compiler.
+# --- binary artifact --------------------------------------------------------
+# When the package has native sources, compile udt-callc/*.c to .o in a
+# staging copy and drop the .c so the tar carries objects the client links
+# without a compiler (the client already prefers a pre-built .o over a .c).
+# Compiled BASIC objects + data files, if any, ride along endian-locked.
 STAGE="$(mktemp -d)"
 cp -a /pkg/. "$STAGE/"
 rm -rf "$STAGE/.git" "$STAGE/out"
-if ls "$STAGE"/udt-callc/*.c >/dev/null 2>&1; then
+if [ "$NATIVE" = 1 ]; then
   # Match the client's per-package compile (udt-callc-build.sh): package
-  # sources are self-contained; the generated dispatch glue links them.  The
-  # client already prefers a pre-built .o over a .c ("binary-only release").
+  # sources are self-contained; the generated dispatch glue links them.
   for c in "$STAGE"/udt-callc/*.c; do
     echo "   cc $(basename "$c") -> $(basename "${c%.c}").o"
     gcc -m64 -fPIC -O2 -c "$c" -o "${c%.c}.o"
@@ -47,7 +61,7 @@ if ls "$STAGE"/udt-callc/*.c >/dev/null 2>&1; then
   done
   echo ">> native bridge precompiled for $SYSTEM/$ARCH (binary ships .o, no .c)"
 else
-  echo ">> no udt-callc/*.c in this package — binary tar mirrors source"
+  echo ">> no native sources — binary is endian-locked ($SYSTEM/$ENDIAN), any CPU"
 fi
 tar czf "$BIN" --exclude='.git' -C "$STAGE" .
 rm -rf "$STAGE"
@@ -62,7 +76,7 @@ fi
 PUB=/registry/publish.sh
 echo ">> publishing to $MVPKG_REGISTRY"
 "$PUB" "$MVPKG_REGISTRY" "$SRC" "$NAME" "$VER" "$DESC" "$DEPS" "$SYSTEM" "source"
-"$PUB" "$MVPKG_REGISTRY" "$BIN" "$NAME" "$VER" "$DESC" "$DEPS" "$SYSTEM" "binary:$SYSTEM:$ARCH"
+"$PUB" "$MVPKG_REGISTRY" "$BIN" "$NAME" "$VER" "$DESC" "$DEPS" "$SYSTEM" "binary:$SYSTEM:$ENDIAN:$BARCH"
 
-echo ">> released $NAME $VER: source + $SYSTEM/$ARCH binary"
+echo ">> released $NAME $VER: source + $SYSTEM/$ENDIAN/$BARCH binary"
 ls -la "$OUT"/*.tar.gz
