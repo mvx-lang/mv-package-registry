@@ -37,20 +37,31 @@ needed), compiles BASIC, and runs the native build toolchain
 
 ## Use it
 
-Run a package's release build — validate its native bridge compiles in a
-clean library, then emit the release tar:
+Run a package's release build — produce **two** artifacts (a portable
+`source` tar and a `binary` tar with the native bridge precompiled for this
+builder's system + architecture) and publish both to a registry:
 
 ```sh
 docker run --rm --hostname unidata --shm-size=512m \
-  -v "$PWD/build-release.sh:/build-release.sh" \
+  -e MVPKG_REGISTRY=https://mv-package.heydon.io \
+  -e MVPKG_PUBLISH_TOKEN=... \
   -v /path/to/udt_curses:/pkg \
   -v /path/to/mv-package-registry:/registry \
   -v "$PWD/releases:/out" \
-  udt-builder:8.3.2 bash /build-release.sh curses 1.0
+  udt-builder:8.3.2 bash /registry/builder/build-release.sh mv-lang/curses 1.0
 ```
 
-produces `releases/curses-1.0.tar.gz` + `meta.json`. Drop the tar + meta into
-a registry (`server/`) and `MVPKG install curses` picks it up.
+produces `releases/mv-lang_curses-1.0-source.tar.gz` and
+`releases/mv-lang_curses-1.0-udt-x86_64.tar.gz`, then publishes them against
+the same version. The registry serves `source` by default and the matching
+binary when `MVPKG install` sends its `system` + `arch`.
+
+- **System** defaults to `udt` — override with `MVPKG_SYSTEM` for a different
+  MV platform.
+- **Architecture** is `$(uname -m)` — `x86_64` on an Intel builder,
+  `aarch64` on an ARM builder. To ship an ARM binary, run the same command on
+  an ARM UniData builder; the source tar is identical, so publish it from
+  whichever builder runs first.
 
 Or get an interactive UniData shell for development:
 
@@ -76,5 +87,5 @@ docker run --rm -it --hostname unidata --shm-size=512m udt-builder:8.3.2 bash
 Dockerfile          Rocky 8 + deps + the captured UniData install
 capture-install.sh  pull a licensed install into ud83.tar.gz (git-ignored)
 entrypoint.sh       start UniData, then exec the requested command
-build-release.sh    validate a package's native build, then produce its release
+build-release.sh    build + publish a release: source tar + per-arch binary tar
 ```
