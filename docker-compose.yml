@@ -1,0 +1,20 @@
+# mv_package registry — deploy on the hosting VM; fronted by the external
+# Traefik (192.168.15.2) which routes mv-package.heydon.io to the published
+# port.  GPL-2.0-only.
+services:
+  mvpkg-registry:
+    build: .
+    image: mvpkg-registry:latest
+    container_name: mvpkg-registry
+    restart: unless-stopped
+    ports:
+      - "8086:8080"                 # Traefik (external host) reaches this
+    volumes:
+      - ./data:/data                # published packages persist here
+    environment:
+      - MVPKG_PUBLISH_TOKEN=${MVPKG_PUBLISH_TOKEN:?set MVPKG_PUBLISH_TOKEN in .env}
+    networks:
+      - proxy
+networks:
+  proxy:
+    external: true

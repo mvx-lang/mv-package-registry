@@ -1,0 +1,7 @@
+# published packages (runtime data)
+registry/*
+!registry/.gitkeep
+# node
+node_modules/
+# deploy secrets
+.env

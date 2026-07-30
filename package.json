@@ -1,0 +1,11 @@
+{
+  "name": "mv-package-registry",
+  "version": "1.0.0",
+  "description": "Registry service, website, and build tooling for mv_package (the MultiValue package manager)",
+  "license": "GPL-2.0-only",
+  "author": "Gordon Heydon",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
