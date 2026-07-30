@@ -75,10 +75,10 @@ Traefik that terminates TLS for `mv-package.heydon.io`.
 ## Build + publish a release
 
 A release can carry more than one artifact for the same version: a portable
-**source** tar plus one **binary** tar per `system`/`arch` (the native bridge
-precompiled to `.o`, so the client installs it without a compiler). The
+**source** tar plus one **binary** tar per `system`/`os`/`arch` (native code
+precompiled, so the client installs it without a compiler). The
 `X-Pkg-Artifact` header tags each upload — `source` (default) or
-`binary:<system>:<arch>`:
+`binary:<system>:<os>:<arch>:<endian>`:
 
 ```sh
 ./mkrelease.sh /path/to/account <name> <version> "<description>" [deps]
@@ -86,9 +86,17 @@ precompiled to `.o`, so the client installs it without a compiler). The
 ```
 
 `GET /package/<name>` returns the source tar by default and the matching
-binary when the client sends `?system=<sys>&arch=<arch>` (the `MVPKG` client
-does this automatically from its `MVPKGOS "PLATFORM"` op). The website
-package page lists every artifact.
+binary when the client sends `?system=&os=&arch=&endian=` (the `MVPKG` client
+does this automatically from its `MVPKGOS "PLATFORM"` op). Native binaries are
+locked to os+arch; compiled BASIC objects + data files, to endianness. The
+website package page lists every artifact.
+
+**External / binary-only sources.** Instead of uploading a tar, pass an
+`http(s)://` URL as `<tar>` and the registry just **indexes** that external
+location (a vendor's server, a GitHub release asset) — no bytes uploaded. This
+is how a **binary-only, commercial** package is served: the registry holds its
+name, licence, and download URL; the client fetches from wherever the artifact
+points. A version with no `source` artifact is shown as **binary only**.
 
 For UniData packages whose native bridge must compile, `builder/` is a
 disposable UniData image that builds **both** artifacts (source + a binary

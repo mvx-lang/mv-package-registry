@@ -313,7 +313,7 @@ function pkgPage(name, user) {
   const sys = (p.systems && p.systems.length) ? p.systems.map(esc).join(', ') : 'any';
   const tar = (p.artifacts && p.artifacts.length)
     ? '<p class="meta"><b>Artifacts:</b></p>' + p.artifacts.map(a =>
-        `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : 'source')}</a></p>`).join('')
+        `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : 'source')}</a>${a.external ? ' <span class="meta">— external</span>' : ''}</p>`).join('')
     : (p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '');
   const owner = p.owner ? `<p class="meta"><b>Owner:</b> ${esc(p.owner)}</p>` : '';
   const license = `<p class="meta"><b>Licence:</b> ${p.license ? esc(p.license) : '<span class="meta">unspecified</span>'}</p>`;
@@ -426,12 +426,21 @@ function publish(req, res, q) {
   const aSystem = aParts[1] || 'any', aOs = aParts[2] || 'any', aArch = aParts[3] || 'any', aEndian = aParts[4] || 'any';
   const suffix = kind === 'binary' ? `${aSystem}-${aOs}-${aArch}-${aEndian}` : 'source';
 
+  // Two ways to publish an artifact:
+  //   upload    — the tar is the request body; the registry hosts it.
+  //   reference — X-Pkg-Url names an external http(s) location (a vendor's
+  //               server, a GitHub release asset, …) and the registry only
+  //               indexes it.  This is how a binary-only / commercial package
+  //               is served without handing its bytes to the registry.
+  const extUrl = field('x-pkg-url', 'url').trim();
+  const isExt = /^https?:\/\//i.test(extUrl);
+
   readBody(req, buf => {
-    if (!buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz)' });
+    if (!isExt && !buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz, or set X-Pkg-Url)' });
     const base = name.split('/').pop();
     const dir = path.join(REGDIR, name);
     const tarName = `${base}-${version}-${suffix}.tar.gz`;
-    const tarball = `/tarball/${name}/${tarName}`;
+    const tarball = isExt ? extUrl : `/tarball/${name}/${tarName}`;
 
     // Merge artifacts into the same version; a new version starts fresh.
     let meta = (existing && existing.version === version) ? existing
@@ -446,6 +455,7 @@ function publish(req, res, q) {
     const art = kind === 'binary'
       ? { kind, system: aSystem, os: aOs, arch: aArch, endian: aEndian, tarball }
       : { kind: 'source', tarball };
+    if (isExt) art.external = true;
     meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.os === art.os && a.arch === art.arch && a.endian === art.endian));
     meta.artifacts.push(art);
     const src = meta.artifacts.find(a => a.kind === 'source');
@@ -456,11 +466,11 @@ function publish(req, res, q) {
 
     try {
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, tarName), buf);
+      if (!isExt) fs.writeFileSync(path.join(dir, tarName), buf);
       fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
     } catch (e) { return sendJSON(res, 500, { error: 'write failed: ' + e.message }); }
-    console.log(`published ${name} ${version} [${suffix}] by ${ownerName} (${buf.length} bytes)`);
-    sendJSON(res, 200, { ok: true, name, version, owner: ownerName, artifact: suffix });
+    console.log(`published ${name} ${version} [${suffix}] by ${ownerName} (${isExt ? 'ref ' + extUrl : buf.length + ' bytes'})`);
+    sendJSON(res, 200, { ok: true, name, version, owner: ownerName, artifact: suffix, external: isExt || undefined });
   });
 }
 
