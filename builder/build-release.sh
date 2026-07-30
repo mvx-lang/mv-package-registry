@@ -19,8 +19,16 @@ DEPS="${3:-}"
 DESC="${4:-built by udt-builder}"
 SYSTEM="${MVPKG_SYSTEM:-udt}"
 ARCH="$(uname -m)"
+# Operating system of this builder — native objects are OS-locked (ELF vs DLL
+# vs XCOFF), so a native binary names its OS as well as its arch.
+OS="$(uname -s | tr 'A-Z' 'a-z')"
+case "$OS" in
+  *linux*) OS=linux ;; *aix*) OS=aix ;; *sunos*) OS=solaris ;;
+  *hp-ux*|*hpux*) OS=hpux ;; *darwin*) OS=darwin ;;
+  *cygwin*|*mingw*|*msys*|*windows*) OS=windows ;;
+esac
 # Endianness of this builder — the axis for compiled BASIC objects + data
-# files (native code is keyed by arch instead).  0201 = little, 0102 = big.
+# files (native code is keyed by os+arch instead).  0201 = little, 0102 = big.
 case "$(printf '\1\2' | od -An -tx2 | tr -d ' \n')" in
   0201*) ENDIAN=le ;; 0102*) ENDIAN=be ;; *) ENDIAN=le ;;
 esac
@@ -28,17 +36,18 @@ esac
 OUT=/out ; mkdir -p "$OUT"
 SAFE="$(printf '%s' "$NAME" | tr '/' '_')"       # scoped names carry a slash
 
-# A binary with native objects is locked to arch; a pure BASIC/data binary is
-# locked only to endianness (arch "any", portable across same-endian CPUs).
+# A binary with native objects is locked to this OS + arch; a pure BASIC/data
+# binary is locked only to endianness (os/arch "any", portable across
+# same-endian hosts).
 if ls /pkg/udt-callc/*.c >/dev/null 2>&1; then
-  BARCH="$ARCH" ; NATIVE=1
+  BOS="$OS" ; BARCH="$ARCH" ; NATIVE=1
 else
-  BARCH=any ; NATIVE=0
+  BOS=any ; BARCH=any ; NATIVE=0
 fi
 SRC="$OUT/$SAFE-$VER-source.tar.gz"
-BIN="$OUT/$SAFE-$VER-$SYSTEM-$ENDIAN-$BARCH.tar.gz"
+BIN="$OUT/$SAFE-$VER-$SYSTEM-$BOS-$BARCH-$ENDIAN.tar.gz"
 
-echo ">> building $NAME $VER  (source + $SYSTEM/$ENDIAN/$BARCH binary)"
+echo ">> building $NAME $VER  (source + $SYSTEM/$BOS/$BARCH/$ENDIAN binary)"
 
 # --- source artifact: the package exactly as authored -----------------------
 tar czf "$SRC" --exclude='.git' --exclude='./out' -C /pkg .
@@ -59,9 +68,9 @@ if [ "$NATIVE" = 1 ]; then
     gcc -m64 -fPIC -O2 -c "$c" -o "${c%.c}.o"
     rm -f "$c"
   done
-  echo ">> native bridge precompiled for $SYSTEM/$ARCH (binary ships .o, no .c)"
+  echo ">> native bridge precompiled for $SYSTEM/$OS/$ARCH (binary ships .o, no .c)"
 else
-  echo ">> no native sources — binary is endian-locked ($SYSTEM/$ENDIAN), any CPU"
+  echo ">> no native sources — binary is endian-locked ($SYSTEM/$ENDIAN), any OS/CPU"
 fi
 tar czf "$BIN" --exclude='.git' -C "$STAGE" .
 rm -rf "$STAGE"
@@ -76,7 +85,7 @@ fi
 PUB=/registry/publish.sh
 echo ">> publishing to $MVPKG_REGISTRY"
 "$PUB" "$MVPKG_REGISTRY" "$SRC" "$NAME" "$VER" "$DESC" "$DEPS" "$SYSTEM" "source"
-"$PUB" "$MVPKG_REGISTRY" "$BIN" "$NAME" "$VER" "$DESC" "$DEPS" "$SYSTEM" "binary:$SYSTEM:$ENDIAN:$BARCH"
+"$PUB" "$MVPKG_REGISTRY" "$BIN" "$NAME" "$VER" "$DESC" "$DEPS" "$SYSTEM" "binary:$SYSTEM:$BOS:$BARCH:$ENDIAN"
 
-echo ">> released $NAME $VER: source + $SYSTEM/$ENDIAN/$BARCH binary"
+echo ">> released $NAME $VER: source + $SYSTEM/$BOS/$BARCH/$ENDIAN binary"
 ls -la "$OUT"/*.tar.gz

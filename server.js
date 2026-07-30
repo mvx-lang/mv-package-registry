@@ -295,11 +295,12 @@ function homePage(q, user) {
   return page('mv_package', search + cards, user);
 }
 
-// Human label for a binary artifact: arch-locked -> "udt/x86_64 (binary)";
-// endian-locked (arch: any) -> "udt le, any CPU (binary)".
+// Human label for a binary artifact: native -> "udt on linux/x86_64 (binary)";
+// endian-locked (os/arch "any") -> "udt le, any OS/CPU (binary)".
 function artLabel(a) {
-  const archLocked = a.arch && a.arch !== 'any';
-  const where = archLocked ? `${a.system}/${a.arch}` : `${a.system} ${a.endian || '?'}, any CPU`;
+  const native = a.arch && a.arch !== 'any';
+  const where = native ? `${a.system} on ${a.os || '?'}/${a.arch}`
+                       : `${a.system} ${a.endian || '?'}, any OS/CPU`;
   return `${where} (binary)`;
 }
 
@@ -410,14 +411,15 @@ function publish(req, res, q) {
   const ownerName = (existing && existing.owner) || publisher || field('x-pkg-owner', 'owner') || 'admin';
 
   // Which artifact this upload is: "source" (default) or
-  // "binary:<system>:<endian>:<arch>".  Compiled BASIC objects + data files
-  // are locked to endianness; native code is locked to arch.  arch = "any"
-  // marks an endian-locked (arch-agnostic) binary — portable across CPUs of
-  // the same endianness; a real arch (e.g. x86_64) marks an arch-locked one.
+  // "binary:<system>:<os>:<arch>:<endian>".  Native code is locked to the OS
+  // (linux/windows/aix — ELF vs DLL vs XCOFF) and the CPU arch; compiled BASIC
+  // objects + data files are locked only to endianness.  A pure-BASIC binary
+  // is os="any" arch="any" (endian-locked, portable across same-endian hosts);
+  // a native one names a real os + arch.
   const aParts = String(field('x-pkg-artifact', 'artifact') || 'source').split(':');
   const kind = aParts[0] === 'binary' ? 'binary' : 'source';
-  const aSystem = aParts[1] || 'any', aEndian = aParts[2] || 'any', aArch = aParts[3] || 'any';
-  const suffix = kind === 'binary' ? `${aSystem}-${aEndian}-${aArch}` : 'source';
+  const aSystem = aParts[1] || 'any', aOs = aParts[2] || 'any', aArch = aParts[3] || 'any', aEndian = aParts[4] || 'any';
+  const suffix = kind === 'binary' ? `${aSystem}-${aOs}-${aArch}-${aEndian}` : 'source';
 
   readBody(req, buf => {
     if (!buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz)' });
@@ -434,9 +436,9 @@ function publish(req, res, q) {
     const deps = field('x-pkg-dependencies', 'dependencies'); if (deps) meta.dependencies = deps;
 
     const art = kind === 'binary'
-      ? { kind, system: aSystem, endian: aEndian, arch: aArch, tarball }
+      ? { kind, system: aSystem, os: aOs, arch: aArch, endian: aEndian, tarball }
       : { kind: 'source', tarball };
-    meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.endian === art.endian && a.arch === art.arch));
+    meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.os === art.os && a.arch === art.arch && a.endian === art.endian));
     meta.artifacts.push(art);
     const src = meta.artifacts.find(a => a.kind === 'source');
     meta.tarball = src ? src.tarball : tarball;        // default (unselected) = source
@@ -463,19 +465,19 @@ function publish(req, res, q) {
 // per-artifact listing lives on the website page (/p/<name>), which reads the
 // raw meta.  With a system+arch that matches a binary, serve it; otherwise the
 // source tar.
-function selectArtifact(meta, system, arch, endian) {
+function selectArtifact(meta, system, os, arch, endian) {
   let tarball = meta.tarball, selected = 'source';
   if (system && meta.artifacts && meta.artifacts.length) {
-    // Eligible binaries: same system, endian matches (both objects and native
-    // code are endian-consistent), and either arch-agnostic ("any") or the
-    // caller's arch.  Prefer an arch-locked binary over an endian-locked one.
-    const bins = meta.artifacts.filter(a => a.kind === 'binary'
-      && a.system === system
-      && (!endian || !a.endian || a.endian === 'any' || a.endian === endian)
-      && (!a.arch || a.arch === 'any' || a.arch === arch));
-    const chosen = bins.find(a => a.arch && a.arch !== 'any')  // arch-locked (most specific)
-                || bins[0]                                      // endian-locked (arch: any)
-                || meta.artifacts.find(a => a.kind === 'source');
+    // A binary is eligible when it matches on every dimension it pins down: for
+    // each of os/arch/endian, "any" matches anything, otherwise the caller must
+    // supply that exact value (so a native os/arch binary is never handed to an
+    // unknown or mismatched host).  Prefer a native binary (real os+arch) over
+    // an endian-locked one (os/arch "any").
+    const dimOk = (av, cv) => !av || av === 'any' || (!!cv && av === cv);
+    const bins = meta.artifacts.filter(a => a.kind === 'binary' && a.system === system
+      && dimOk(a.os, os) && dimOk(a.arch, arch) && dimOk(a.endian, endian));
+    const native = bins.find(a => a.arch && a.arch !== 'any' && a.os && a.os !== 'any');
+    const chosen = native || bins[0] || meta.artifacts.find(a => a.kind === 'source');
     if (chosen) { tarball = chosen.tarball; selected = chosen.kind; }
   }
   return {
@@ -645,7 +647,7 @@ const server = http.createServer((req, res) => {
     const meta = loadPackage(nm);
     if (!meta) return sendJSON(res, 404, { error: 'not found' });
     // ?system=&arch= -> tarball resolved to the best matching artifact
-    return sendJSON(res, 200, selectArtifact(meta, u.query.system, u.query.arch, u.query.endian));
+    return sendJSON(res, 200, selectArtifact(meta, u.query.system, u.query.os, u.query.arch, u.query.endian));
   }
   if (parts[0] === 'search') {
     const qs = String(u.query.q || '').toLowerCase();
