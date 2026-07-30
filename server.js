@@ -28,6 +28,11 @@ const crypto = require('crypto');
 const https = require('https');
 const querystring = require('querystring');
 const webauthn = require('./lib/webauthn');
+const github = require('./lib/github');
+
+// Public base URL (for webhook URLs shown to the user); reuse the WebAuthn
+// origin in production, derive nothing useful in dev.
+const BASE_URL = process.env.PUBLIC_ORIGIN || process.env.WEBAUTHN_ORIGIN || '';
 
 // Cloudflare Turnstile (CAPTCHA) on registration.  Off unless both keys are
 // set; the sitekey is public (rendered in the form), the secret verifies the
@@ -149,6 +154,19 @@ function findUserByCredId(credId) {
 function waUserId(user) {
   if (!user.waId) { user.waId = crypto.randomBytes(16).toString('base64url'); saveUser(user); }
   return user.waId;
+}
+// Find a connected-repo record by its webhook id, across all users.
+function findRepoConn(id) {
+  let files; try { files = fs.readdirSync(USERDIR); } catch { return null; }
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const usr = JSON.parse(fs.readFileSync(path.join(USERDIR, f), 'utf8'));
+      const conn = (usr.repos || []).find(r => r.id === id);
+      if (conn) return { user: usr, conn };
+    } catch {}
+  }
+  return null;
 }
 
 // ---- sessions (stateless signed cookie) ------------------------------
@@ -329,10 +347,30 @@ function accountPage(user, opts) {
         <div><b>${esc(p.name || 'passkey')}</b> <span class="badge">${esc(p.kind || 'ec')}</span><br><span class="meta">added ${new Date(p.created).toISOString().slice(0, 10)}${p.lastUsed ? ' &middot; last used ' + new Date(p.lastUsed).toISOString().slice(0, 10) : ''}</span></div>
         <form method="post" action="/account/passkeys/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(p.credId)}"><button style="padding:4px 12px">Remove</button></form></div>`).join('')
     : '<p class="meta">No passkeys yet.</p>';
+  const repos = (user.repos || []).length
+    ? (user.repos || []).map(r => `<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start"><div>
+          <b>${esc(r.repo)}</b>${r.package ? ' &rarr; <code>' + esc(r.package) + '</code>' : ''}<br>
+          <span class="meta">latest release: ${r.latest ? esc(r.latest.tag) + ' &middot; ' + new Date(r.latest.at).toISOString().slice(0, 10) + (r.latest.html ? ' &middot; <a href="' + esc(r.latest.html) + '">view</a>' : '') : 'none detected yet'}</span><br>
+          <span class="meta">webhook: <code>${esc(BASE_URL)}/webhook/github/${esc(r.id)}</code></span></div>
+          <form method="post" action="/account/repos/remove" style="margin:0"><input type="hidden" name="id" value="${esc(r.id)}"><button style="padding:4px 12px">Disconnect</button></form></div></div>`).join('')
+    : '<p class="meta">No repositories connected.</p>';
+  const hookMsg = opts.freshHook
+    ? `<div class="msg ok">Connected <b>${esc(opts.freshHook.repo)}</b>. For instant notifications add a webhook in GitHub → Settings → Webhooks:</div>
+       <p class="meta">Payload URL <code>${esc(BASE_URL)}/webhook/github/${esc(opts.freshHook.id)}</code> &middot; Content type <code>application/json</code> &middot; event: Releases. Secret (copy now):</p>
+       <div class="tok">${esc(opts.freshHook.secret)}</div>`
+    : '';
+  const repoErr = opts.repoError ? `<div class="msg err">${esc(opts.repoError)}</div>` : '';
   return page('Account — mv_package',
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
      <h3 style="margin-top:24px">Passkeys</h3>${pks}
      <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
+     <h3 style="margin-top:24px">GitHub repositories</h3>${hookMsg}${repoErr}${repos}
+     <form method="post" action="/account/repos" style="margin-top:14px">
+       <label>Repository (owner/name)</label><input type="text" name="repo" placeholder="mvx-lang/udt_curses">
+       <label>Target package name (optional)</label><input type="text" name="package" placeholder="mv-lang/curses">
+       <div style="margin-top:10px"><button class="primary" type="submit">Connect repository</button></div>
+     </form>
      <h3 style="margin-top:24px">Your packages</h3>${pkgs}
      <h3 style="margin-top:24px">Publish tokens</h3>${fresh}${toks}
      <form method="post" action="/account/tokens" style="margin-top:14px">
@@ -412,6 +450,23 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST') {
     if (parts[0] === 'publish') return publish(req, res, u.query);
     return readBody(req, buf => {
+      // GitHub webhook — verify the HMAC over the RAW body, record releases
+      if (parts[0] === 'webhook' && parts[1] === 'github' && parts[2]) {
+        const found = findRepoConn(parts[2]);
+        if (!found) { res.writeHead(404); return res.end('unknown hook'); }
+        if (!github.verifyWebhook(found.conn.secret, req.headers['x-hub-signature-256'], buf)) { res.writeHead(401); return res.end('bad signature'); }
+        const event = req.headers['x-github-event'];
+        if (event === 'ping') return sendJSON(res, 200, { ok: true });
+        if (event === 'release') {
+          let p; try { p = JSON.parse(buf.toString()); } catch { p = null; }
+          if (p && p.release && ['published', 'released', 'created'].includes(p.action)) {
+            found.conn.latest = github.releaseInfo(p.release); found.conn.latest.seenAt = Date.now();
+            saveUser(found.user);
+            console.log(`webhook: ${found.conn.repo} release ${found.conn.latest.tag}`);
+          }
+        }
+        return sendJSON(res, 200, { ok: true });
+      }
       // WebAuthn verify endpoints take a JSON body
       if (u.pathname === '/webauthn/register/verify' || u.pathname === '/webauthn/login/verify') {
         let body; try { body = JSON.parse(buf.toString()); } catch { return sendJSON(res, 400, { error: 'bad json' }); }
@@ -443,6 +498,22 @@ const server = http.createServer((req, res) => {
       if (u.pathname === '/account/passkeys/revoke') {
         if (!user) return redirect(res, '/login');
         user.passkeys = (user.passkeys || []).filter(p => p.credId !== form.id);
+        saveUser(user); return redirect(res, '/account');
+      }
+      if (u.pathname === '/account/repos') {
+        if (!user) return redirect(res, '/login');
+        const repo = String(form.repo || '').trim();
+        if (!github.okRepo(repo)) return sendHTML(res, 400, accountPage(user, { repoError: 'Use owner/repo, e.g. mvx-lang/udt_curses.' }));
+        user.repos = user.repos || [];
+        const conn = { id: crypto.randomBytes(6).toString('hex'), repo, package: String(form.package || '').trim(),
+          secret: crypto.randomBytes(24).toString('base64url'), latest: null, added: Date.now() };
+        user.repos.push(conn); saveUser(user);
+        github.latestRelease(repo, (e, rel) => { if (!e && rel) { const u2 = loadUser(user.username); const c2 = (u2.repos || []).find(x => x.id === conn.id); if (c2) { c2.latest = rel; saveUser(u2); } } });
+        return sendHTML(res, 200, accountPage(loadUser(user.username), { freshHook: conn }));
+      }
+      if (u.pathname === '/account/repos/remove') {
+        if (!user) return redirect(res, '/login');
+        user.repos = (user.repos || []).filter(r => r.id !== form.id);
         saveUser(user); return redirect(res, '/account');
       }
       if (u.pathname === '/register') return handleRegister(req, res, form);
@@ -534,3 +605,23 @@ server.listen(PORT, () => {
   console.log(`mv_package registry on http://0.0.0.0:${PORT}  (registry: ${REGDIR})`);
   console.log(`  accounts enabled; publish needs a per-user token${ADMIN_TOKEN ? ' or the admin token' : ''}`);
 });
+
+// Poll connected repos for new releases — a fallback to the webhook, and how
+// releases are picked up when no webhook is configured.
+const POLL_MS = Number(process.env.GITHUB_POLL_MS || 15 * 60 * 1000);
+if (POLL_MS > 0) setInterval(() => {
+  let files; try { files = fs.readdirSync(USERDIR); } catch { return; }
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    let usr; try { usr = JSON.parse(fs.readFileSync(path.join(USERDIR, f), 'utf8')); } catch { continue; }
+    for (const conn of (usr.repos || [])) {
+      github.latestRelease(conn.repo, (e, rel) => {
+        if (e || !rel) return;
+        if (!conn.latest || conn.latest.tag !== rel.tag) {
+          const u2 = loadUser(usr.username); const c2 = (u2.repos || []).find(x => x.id === conn.id);
+          if (c2) { rel.seenAt = Date.now(); c2.latest = rel; saveUser(u2); console.log(`poll: ${conn.repo} -> ${rel.tag}`); }
+        }
+      });
+    }
+  }
+}, POLL_MS).unref();
