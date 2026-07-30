@@ -5,6 +5,8 @@
 FROM node:20-alpine
 WORKDIR /app
 COPY server.js .
+COPY lib ./lib
+COPY public ./public
 ENV MVPKG_REGISTRY_DIR=/data MVPKG_PORT=8080
 VOLUME /data
 EXPOSE 8080

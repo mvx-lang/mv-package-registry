@@ -26,6 +26,16 @@ const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
 const querystring = require('querystring');
+const webauthn = require('./lib/webauthn');
+
+// WebAuthn relying-party identity.  Behind a TLS-terminating proxy the server
+// sees http, so production sets these explicitly; local dev derives them.
+function rpFor(req) {
+  if (process.env.WEBAUTHN_RP_ID && process.env.WEBAUTHN_ORIGIN)
+    return { rpId: process.env.WEBAUTHN_RP_ID, origin: process.env.WEBAUTHN_ORIGIN };
+  const host = req.headers.host || 'localhost';
+  return { rpId: host.split(':')[0], origin: 'http://' + host };
+}
 
 const REGDIR = process.env.MVPKG_REGISTRY_DIR || path.join(__dirname, 'registry');
 const AUTHDIR = path.join(REGDIR, '_auth');       // no meta.json -> skipped as a package
@@ -101,6 +111,24 @@ function findUserByToken(tok) {
   return null;
 }
 
+function findUserByCredId(credId) {
+  let files; try { files = fs.readdirSync(USERDIR); } catch { return null; }
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const usr = JSON.parse(fs.readFileSync(path.join(USERDIR, f), 'utf8'));
+      const pk = (usr.passkeys || []).find(p => p.credId === credId);
+      if (pk) return { user: usr, passkey: pk };
+    } catch {}
+  }
+  return null;
+}
+// A stable opaque WebAuthn user handle (created once per user).
+function waUserId(user) {
+  if (!user.waId) { user.waId = crypto.randomBytes(16).toString('base64url'); saveUser(user); }
+  return user.waId;
+}
+
 // ---- sessions (stateless signed cookie) ------------------------------
 function makeSession(username) {
   const payload = Buffer.from(username).toString('base64url') + '.' + (Date.now() + 30 * 864e5);
@@ -124,6 +152,22 @@ const sessionCookie = (req, username) => {
 function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', 'mvpkg_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
 }
+
+// short-lived HMAC-signed value — used to remember a WebAuthn challenge
+// between the /options and /verify steps without server-side state.
+function signValue(obj) {
+  const payload = Buffer.from(JSON.stringify(obj)).toString('base64url');
+  return payload + '.' + crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
+}
+function readSigned(str) {
+  const [payload, sig] = String(str || '').split('.');
+  if (!payload || !sig) return null;
+  const good = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
+  try { if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return null; } catch { return null; }
+  try { const o = JSON.parse(Buffer.from(payload, 'base64url').toString()); return (o.exp && Date.now() > o.exp) ? null : o; } catch { return null; }
+}
+const waCookie = v => `mvpkg_wa=${signValue(v)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300`;
+const waChallenge = req => { const m = /(?:^|;\s*)mvpkg_wa=([^;]+)/.exec(req.headers.cookie || ''); return m ? readSigned(m[1]) : null; };
 
 // ---- helpers ---------------------------------------------------------
 function sendJSON(res, code, obj) {
@@ -189,7 +233,8 @@ function page(title, inner, user) {
 <header><div class="wrap"><h1><a href="/">mv_package</a></h1><span class="tag">a package registry for MultiValue</span>
 <span class="nav">${nav}</span></div></header>
 <main class="wrap">${inner}</main>
-<footer class="wrap">mv_package &middot; Composer/npm for the PICK world &middot; <code>MVPKG install &lt;name&gt;</code></footer></body></html>`;
+<footer class="wrap">mv_package &middot; Composer/npm for the PICK world &middot; <code>MVPKG install &lt;name&gt;</code></footer>
+<script src="/wa.js" defer></script></body></html>`;
 }
 
 function homePage(q, user) {
@@ -230,9 +275,10 @@ function authForm(kind, msg, values) {
        <label>Username</label><input type="text" name="username" value="${esc((values || {}).username || '')}" autocomplete="username" required>
        ${isReg ? '<label>Email</label><input type="email" name="email" value="' + esc((values || {}).email || '') + '" autocomplete="email" required>' : ''}
        <label>Password</label><input type="password" name="password" autocomplete="${isReg ? 'new-password' : 'current-password'}" required>
-       <div style="margin-top:14px"><button class="primary" type="submit">${isReg ? 'Register' : 'Sign in'}</button></div>
+       <div style="margin-top:14px"><button class="primary" type="submit">${isReg ? 'Register' : 'Sign in'}</button>
+       ${isReg ? '' : ' <button type="button" onclick="loginPasskey()">Sign in with a passkey</button>'}</div>
      </form>
-     <p class="meta">${isReg ? 'Already have an account? <a href="/login">Sign in</a>.' : 'New here? <a href="/register">Register</a>.'}</p>`);
+     <p class="meta">${isReg ? 'Already have an account? <a href="/login">Sign in</a>.' : 'New here? <a href="/register">Register</a>. After signing in, add a passkey on your account page.'}</p>`);
 }
 
 function accountPage(user, opts) {
@@ -251,8 +297,15 @@ function accountPage(user, opts) {
        <p class="meta">Publish with it: <code>MVPKG_PUBLISH_TOKEN=&lt;token&gt; publish.sh …</code></p>`
     : '';
   const adminBadge = isAdminUser(user) ? ' <span class="badge" style="border-color:var(--acc);color:var(--acc)">admin</span>' : '';
+  const pks = (user.passkeys || []).length
+    ? (user.passkeys || []).map(p => `<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+        <div><b>${esc(p.name || 'passkey')}</b> <span class="badge">${esc(p.kind || 'ec')}</span><br><span class="meta">added ${new Date(p.created).toISOString().slice(0, 10)}${p.lastUsed ? ' &middot; last used ' + new Date(p.lastUsed).toISOString().slice(0, 10) : ''}</span></div>
+        <form method="post" action="/account/passkeys/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(p.credId)}"><button style="padding:4px 12px">Remove</button></form></div>`).join('')
+    : '<p class="meta">No passkeys yet.</p>';
   return page('Account — mv_package',
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
+     <h3 style="margin-top:24px">Passkeys</h3>${pks}
+     <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
      <h3 style="margin-top:24px">Your packages</h3>${pkgs}
      <h3 style="margin-top:24px">Publish tokens</h3>${fresh}${toks}
      <form method="post" action="/account/tokens" style="margin-top:14px">
@@ -328,7 +381,39 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST') {
     if (parts[0] === 'publish') return publish(req, res, u.query);
     return readBody(req, buf => {
+      // WebAuthn verify endpoints take a JSON body
+      if (u.pathname === '/webauthn/register/verify' || u.pathname === '/webauthn/login/verify') {
+        let body; try { body = JSON.parse(buf.toString()); } catch { return sendJSON(res, 400, { error: 'bad json' }); }
+        const { rpId, origin } = rpFor(req);
+        const wa = waChallenge(req);
+        if (u.pathname === '/webauthn/register/verify') {
+          if (!user) return sendJSON(res, 401, { error: 'sign in first' });
+          if (!wa || wa.purpose !== 'register' || wa.username !== user.username) return sendJSON(res, 400, { error: 'no or expired challenge' });
+          try {
+            const r = webauthn.verifyRegistration({ clientDataJSON: body.response.clientDataJSON, attestationObject: body.response.attestationObject }, { challenge: wa.challenge, origin, rpId });
+            user.passkeys = user.passkeys || [];
+            if (user.passkeys.some(p => p.credId === r.credId)) return sendJSON(res, 409, { error: 'passkey already registered' });
+            user.passkeys.push({ credId: r.credId, publicKeyPem: r.publicKeyPem, kind: r.kind, counter: r.counter, name: (body.name || 'passkey').slice(0, 40), created: Date.now() });
+            saveUser(user);
+            return sendJSON(res, 200, { ok: true });
+          } catch (e) { return sendJSON(res, 400, { error: e.message }); }
+        }
+        if (!wa || wa.purpose !== 'login') return sendJSON(res, 400, { error: 'no or expired challenge' });
+        const found = findUserByCredId(body.id);
+        if (!found) return sendJSON(res, 401, { error: 'unknown passkey' });
+        try {
+          const r = webauthn.verifyAssertion({ clientDataJSON: body.response.clientDataJSON, authenticatorData: body.response.authenticatorData, signature: body.response.signature }, found.passkey, { challenge: wa.challenge, origin, rpId });
+          found.passkey.counter = r.newCounter; found.passkey.lastUsed = Date.now(); saveUser(found.user);
+          res.setHeader('Set-Cookie', sessionCookie(req, found.user.username));
+          return sendJSON(res, 200, { ok: true, username: found.user.username });
+        } catch (e) { return sendJSON(res, 401, { error: e.message }); }
+      }
       const form = querystring.parse(buf.toString());
+      if (u.pathname === '/account/passkeys/revoke') {
+        if (!user) return redirect(res, '/login');
+        user.passkeys = (user.passkeys || []).filter(p => p.credId !== form.id);
+        saveUser(user); return redirect(res, '/account');
+      }
       if (u.pathname === '/register') return handleRegister(req, res, form);
       if (u.pathname === '/login') return handleLogin(req, res, form);
       if (u.pathname === '/logout') { clearSessionCookie(res); return redirect(res, '/'); }
@@ -357,6 +442,29 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/register') return sendHTML(res, 200, authForm('register'));
   if (u.pathname === '/login') return sendHTML(res, 200, authForm('login'));
   if (u.pathname === '/account') return user ? sendHTML(res, 200, accountPage(user)) : redirect(res, '/login');
+  if (u.pathname === '/wa.js') {
+    try { const js = fs.readFileSync(path.join(__dirname, 'public', 'wa.js'));
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Content-Length': js.length }); return res.end(js);
+    } catch { res.writeHead(404); return res.end('not found'); }
+  }
+  if (u.pathname === '/webauthn/register/options') {
+    if (!user) return sendJSON(res, 401, { error: 'sign in first' });
+    const { rpId } = rpFor(req); const ch = webauthn.challenge();
+    res.setHeader('Set-Cookie', waCookie({ challenge: ch, purpose: 'register', username: user.username, exp: Date.now() + 3e5 }));
+    return sendJSON(res, 200, { challenge: ch, rp: { id: rpId, name: 'mv_package' },
+      user: { id: waUserId(user), name: user.username, displayName: user.username },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      timeout: 6e4, attestation: 'none',
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+      excludeCredentials: (user.passkeys || []).map(p => ({ type: 'public-key', id: p.credId })) });
+  }
+  if (u.pathname === '/webauthn/login/options') {
+    const { rpId } = rpFor(req); const ch = webauthn.challenge();
+    const target = u.query.username ? loadUser(String(u.query.username).trim()) : null;
+    const allow = target ? (target.passkeys || []).map(p => ({ type: 'public-key', id: p.credId })) : [];
+    res.setHeader('Set-Cookie', waCookie({ challenge: ch, purpose: 'login', exp: Date.now() + 3e5 }));
+    return sendJSON(res, 200, { challenge: ch, rpId, allowCredentials: allow, userVerification: 'preferred', timeout: 6e4 });
+  }
   if (parts[0] === 'p' && parts[1]) {
     if (!okName(parts[1])) { res.writeHead(400); return res.end('bad name'); }
     const html = pkgPage(parts[1], user);

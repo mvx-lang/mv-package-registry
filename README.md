@@ -74,11 +74,13 @@ MVX_HOME=/path/to/mvx-lang MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
 
 The registry is growing from a file-backed service into an application:
 
-- **User registration & auth** — **done (password).** Register/sign-in,
-  sessions, and per-user publish tokens (managed at `/account`). A package is
-  owned by its first publisher; only the owner (or the admin
-  `MVPKG_PUBLISH_TOKEN`) may publish new versions. **Passkeys (WebAuthn)** for
-  passwordless sign-in are next.
+- **User registration & auth** — **done.** Register/sign-in, sessions, and
+  per-user publish tokens (managed at `/account`). A package is owned by its
+  first publisher; only the owner (or an admin — `MVPKG_ADMIN_USERS`, or the
+  `MVPKG_PUBLISH_TOKEN`) may publish new versions. **Passkeys (WebAuthn)** —
+  **done**, add/sign-in from `/account` and `/login`; dependency-free (own
+  CBOR/COSE parsing + `crypto` verification in [`lib/webauthn.js`](lib/webauthn.js)).
+  Set `WEBAUTHN_RP_ID` + `WEBAUTHN_ORIGIN` in production.
 - **GitHub integration** — connect repositories and monitor them for new
   releases, so a published GitHub release can flow into the registry.
 - **Release deployment** — let `mv_package` deploy selected releases: choose
