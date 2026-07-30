@@ -301,7 +301,10 @@ function pkgPage(name, user) {
   const deps = String(p.dependencies || '').trim();
   const depsHtml = deps ? deps.split(/\s+/).map(d => `<a href="/p/${esc(d)}">${esc(d)}</a>`).join(', ') : '<span class="meta">none</span>';
   const sys = (p.systems && p.systems.length) ? p.systems.map(esc).join(', ') : 'any';
-  const tar = p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '';
+  const tar = (p.artifacts && p.artifacts.length)
+    ? '<p class="meta"><b>Artifacts:</b></p>' + p.artifacts.map(a =>
+        `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? a.system + '/' + a.arch + ' (binary)' : 'source')}</a></p>`).join('')
+    : (p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '');
   const owner = p.owner ? `<p class="meta"><b>Owner:</b> ${esc(p.owner)}</p>` : '';
   return page(`${p.name} — mv_package`,
     `<div class="card"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span></h3><p>${esc(p.description || '')}</p></div>
@@ -398,27 +401,54 @@ function publish(req, res, q) {
   // preserve the owner on re-publish; a new package is owned by its publisher
   const ownerName = (existing && existing.owner) || publisher || field('x-pkg-owner', 'owner') || 'admin';
 
+  // Which artifact this upload is: "source" (default) or "binary:<system>:<arch>".
+  const [aKind, aSystem, aArch] = String(field('x-pkg-artifact', 'artifact') || 'source').split(':');
+  const kind = aKind === 'binary' ? 'binary' : 'source';
+  const suffix = kind === 'binary' ? `${aSystem || 'any'}-${aArch || 'any'}` : 'source';
+
   readBody(req, buf => {
     if (!buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz)' });
-    const base = name.split('/').pop();                // tar filename uses the last segment
-    const dir = path.join(REGDIR, name), tarName = `${base}-${version}.tar.gz`;
+    const base = name.split('/').pop();
+    const dir = path.join(REGDIR, name);
+    const tarName = `${base}-${version}-${suffix}.tar.gz`;
+    const tarball = `/tarball/${name}/${tarName}`;
+
+    // Merge artifacts into the same version; a new version starts fresh.
+    let meta = (existing && existing.version === version) ? existing
+      : { name, version, owner: ownerName, description: '', dependencies: '', systems: [], artifacts: [], tarball: '', published: Date.now() };
+    meta.owner = ownerName;
+    const desc = field('x-pkg-description', 'description'); if (desc) meta.description = desc;
+    const deps = field('x-pkg-dependencies', 'dependencies'); if (deps) meta.dependencies = deps;
+
+    const art = kind === 'binary'
+      ? { kind, system: aSystem || 'any', arch: aArch || 'any', tarball }
+      : { kind: 'source', tarball };
+    meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.arch === art.arch));
+    meta.artifacts.push(art);
+    const src = meta.artifacts.find(a => a.kind === 'source');
+    meta.tarball = src ? src.tarball : tarball;        // default (unselected) = source
     const sysRaw = field('x-pkg-systems', 'systems');
-    const meta = {
-      name, version, owner: ownerName,
-      description: field('x-pkg-description', 'description'),
-      dependencies: field('x-pkg-dependencies', 'dependencies'),
-      systems: sysRaw ? sysRaw.split(/[,\s]+/).filter(Boolean) : [],
-      tarball: `/tarball/${name}/${tarName}`,
-      published: Date.now(),
-    };
+    const declared = sysRaw ? sysRaw.split(/[,\s]+/).filter(Boolean) : [];
+    meta.systems = [...new Set([...(meta.systems || []), ...declared, ...meta.artifacts.filter(a => a.kind === 'binary').map(a => a.system)])];
+
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, tarName), buf);
       fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
     } catch (e) { return sendJSON(res, 500, { error: 'write failed: ' + e.message }); }
-    console.log(`published ${name} ${version} by ${ownerName} (${buf.length} bytes)`);
-    sendJSON(res, 200, { ok: true, name, version, owner: ownerName });
+    console.log(`published ${name} ${version} [${suffix}] by ${ownerName} (${buf.length} bytes)`);
+    sendJSON(res, 200, { ok: true, name, version, owner: ownerName, artifact: suffix });
   });
+}
+
+// Return meta with `tarball` resolved to the artifact best matching the
+// caller's system+arch: a matching binary, else the source.
+function selectArtifact(meta, system, arch) {
+  if (!system || !meta.artifacts || !meta.artifacts.length) return meta;
+  const bin = meta.artifacts.find(a => a.kind === 'binary' && a.system === system && (!arch || a.arch === arch));
+  const src = meta.artifacts.find(a => a.kind === 'source');
+  const chosen = bin || src;
+  return chosen ? Object.assign({}, meta, { tarball: chosen.tarball, selected: chosen.kind }) : meta;
 }
 
 // ---- account POST handlers ------------------------------------------
@@ -579,7 +609,9 @@ const server = http.createServer((req, res) => {
     const nm = parts.slice(1).join('/');               // scoped: /package/<scope>/<name>
     if (!okName(nm)) return sendJSON(res, 404, { error: 'not found' });
     const meta = loadPackage(nm);
-    return meta ? sendJSON(res, 200, meta) : sendJSON(res, 404, { error: 'not found' });
+    if (!meta) return sendJSON(res, 404, { error: 'not found' });
+    // ?system=&arch= -> tarball resolved to the best matching artifact
+    return sendJSON(res, 200, selectArtifact(meta, u.query.system, u.query.arch));
   }
   if (parts[0] === 'search') {
     const qs = String(u.query.q || '').toLowerCase();
