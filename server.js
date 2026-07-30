@@ -25,8 +25,25 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
+const https = require('https');
 const querystring = require('querystring');
 const webauthn = require('./lib/webauthn');
+
+// Cloudflare Turnstile (CAPTCHA) on registration.  Off unless both keys are
+// set; the sitekey is public (rendered in the form), the secret verifies the
+// token server-side.
+const TURNSTILE_SITEKEY = process.env.TURNSTILE_SITEKEY || '';
+const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET || '';
+function verifyTurnstile(token, ip, cb) {
+  if (!TURNSTILE_SECRET) return cb(true);           // CAPTCHA disabled
+  const body = querystring.stringify({ secret: TURNSTILE_SECRET, response: token || '', remoteip: ip || '' });
+  const r = https.request('https://challenges.cloudflare.com/turnstile/v0/siteverify',
+    { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } },
+    resp => { let d = ''; resp.on('data', c => d += c); resp.on('end', () => { try { cb(!!JSON.parse(d).success); } catch { cb(false); } }); });
+  r.on('error', () => cb(false));
+  r.setTimeout(8000, () => { r.destroy(); cb(false); });
+  r.write(body); r.end();
+}
 
 // WebAuthn relying-party identity.  Behind a TLS-terminating proxy the server
 // sees http, so production sets these explicitly; local dev derives them.
@@ -275,6 +292,7 @@ function authForm(kind, msg, values) {
        <label>Username</label><input type="text" name="username" value="${esc((values || {}).username || '')}" autocomplete="username" required>
        ${isReg ? '<label>Email</label><input type="email" name="email" value="' + esc((values || {}).email || '') + '" autocomplete="email" required>' : ''}
        <label>Password</label><input type="password" name="password" autocomplete="${isReg ? 'new-password' : 'current-password'}" required>
+       ${isReg && TURNSTILE_SITEKEY ? `<div class="cf-turnstile" data-sitekey="${esc(TURNSTILE_SITEKEY)}" style="margin:14px 0"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>` : ''}
        <div style="margin-top:14px"><button class="primary" type="submit">${isReg ? 'Register' : 'Sign in'}</button>
        ${isReg ? '' : ' <button type="button" onclick="loginPasskey()">Sign in with a passkey</button>'}</div>
      </form>
@@ -357,13 +375,16 @@ function publish(req, res, q) {
 
 // ---- account POST handlers ------------------------------------------
 function handleRegister(req, res, form) {
-  const username = (form.username || '').trim(), email = (form.email || '').trim(), password = form.password || '';
-  if (!okUser(username)) return sendHTML(res, 400, authForm('register', 'Username: 2–32 chars, letters/digits/-/_ , starting alphanumeric.', form));
-  if (!okEmail(email)) return sendHTML(res, 400, authForm('register', 'Please enter a valid email.', form));
-  if (password.length < 8) return sendHTML(res, 400, authForm('register', 'Password must be at least 8 characters.', form));
-  if (loadUser(username)) return sendHTML(res, 409, authForm('register', 'That username is taken.', form));
-  saveUser({ username, email, pw: hashPw(password), created: Date.now(), tokens: [], passkeys: [] });
-  redirect(res, '/account', sessionCookie(req, username));
+  verifyTurnstile(form['cf-turnstile-response'], req.socket.remoteAddress || '', ok => {
+    if (!ok) return sendHTML(res, 400, authForm('register', 'CAPTCHA check failed — please try again.', form));
+    const username = (form.username || '').trim(), email = (form.email || '').trim(), password = form.password || '';
+    if (!okUser(username)) return sendHTML(res, 400, authForm('register', 'Username: 2–32 chars, letters/digits/-/_ , starting alphanumeric.', form));
+    if (!okEmail(email)) return sendHTML(res, 400, authForm('register', 'Please enter a valid email.', form));
+    if (password.length < 8) return sendHTML(res, 400, authForm('register', 'Password must be at least 8 characters.', form));
+    if (loadUser(username)) return sendHTML(res, 409, authForm('register', 'That username is taken.', form));
+    saveUser({ username, email, pw: hashPw(password), created: Date.now(), tokens: [], passkeys: [] });
+    redirect(res, '/account', sessionCookie(req, username));
+  });
 }
 function handleLogin(req, res, form) {
   const usr = loadUser((form.username || '').trim());

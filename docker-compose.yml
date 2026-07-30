@@ -16,6 +16,8 @@ services:
       - MVPKG_ADMIN_USERS=${MVPKG_ADMIN_USERS:-}   # comma-separated admin usernames
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-}         # e.g. mv-package.heydon.io
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-}       # e.g. https://mv-package.heydon.io
+      - TURNSTILE_SITEKEY=${TURNSTILE_SITEKEY:-}   # Cloudflare Turnstile (CAPTCHA), public
+      - TURNSTILE_SECRET=${TURNSTILE_SECRET:-}     # Turnstile secret (server-side verify)
     networks:
       - proxy
 networks:

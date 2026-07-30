@@ -80,7 +80,9 @@ The registry is growing from a file-backed service into an application:
   `MVPKG_PUBLISH_TOKEN`) may publish new versions. **Passkeys (WebAuthn)** —
   **done**, add/sign-in from `/account` and `/login`; dependency-free (own
   CBOR/COSE parsing + `crypto` verification in [`lib/webauthn.js`](lib/webauthn.js)).
-  Set `WEBAUTHN_RP_ID` + `WEBAUTHN_ORIGIN` in production.
+  Set `WEBAUTHN_RP_ID` + `WEBAUTHN_ORIGIN` in production. Registration is
+  guarded by **Cloudflare Turnstile** (CAPTCHA) when `TURNSTILE_SITEKEY` +
+  `TURNSTILE_SECRET` are set (off otherwise).
 - **GitHub integration** — connect repositories and monitor them for new
   releases, so a published GitHub release can flow into the registry.
 - **Release deployment** — let `mv_package` deploy selected releases: choose
