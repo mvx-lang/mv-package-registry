@@ -443,12 +443,26 @@ function publish(req, res, q) {
 
 // Return meta with `tarball` resolved to the artifact best matching the
 // caller's system+arch: a matching binary, else the source.
+// Resolve /package to a FLAT client view.  The MVPKG client's JSON decoder is
+// flat (it takes the first matching key), so this response must not carry a
+// nested artifacts[] — each artifact's own "tarball" would shadow the resolved
+// one.  Return the selected tarball first, no artifacts array; the rich
+// per-artifact listing lives on the website page (/p/<name>), which reads the
+// raw meta.  With a system+arch that matches a binary, serve it; otherwise the
+// source tar.
 function selectArtifact(meta, system, arch) {
-  if (!system || !meta.artifacts || !meta.artifacts.length) return meta;
-  const bin = meta.artifacts.find(a => a.kind === 'binary' && a.system === system && (!arch || a.arch === arch));
-  const src = meta.artifacts.find(a => a.kind === 'source');
-  const chosen = bin || src;
-  return chosen ? Object.assign({}, meta, { tarball: chosen.tarball, selected: chosen.kind }) : meta;
+  let tarball = meta.tarball, selected = 'source';
+  if (system && meta.artifacts && meta.artifacts.length) {
+    const bin = meta.artifacts.find(a => a.kind === 'binary' && a.system === system && (!arch || a.arch === arch));
+    const src = meta.artifacts.find(a => a.kind === 'source');
+    const chosen = bin || src;
+    if (chosen) { tarball = chosen.tarball; selected = chosen.kind; }
+  }
+  return {
+    name: meta.name, version: meta.version, tarball,
+    description: meta.description || '', dependencies: meta.dependencies || '',
+    systems: meta.systems || [], owner: meta.owner, selected,
+  };
 }
 
 // ---- account POST handlers ------------------------------------------
