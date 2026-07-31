@@ -3,20 +3,23 @@
 //
 // Dependency-free HTTP registry + website + accounts.
 //
-// JSON API (the MVPKG client speaks this):
-//   GET  /package/<name>   that package's metadata
-//   GET  /search?q=<term>  {"packages":[{name,version,description}, ...]}
-//   GET  /tarball/<n>/<f>  the release tar bytes
+// An INDEX, not a host.  A package is added from its source URL (a repository,
+// or a link to its mvpkg.json); a provider reads the manifest, tracks releases,
+// and the registry records each release asset as an external download URL.  It
+// stores no bytes.
 //
-// Publish (POST /publish; body = the tar, metadata as X-Pkg-* headers):
-//   authenticated with a per-user token in X-Auth-Token (see /account), or
-//   the admin MVPKG_PUBLISH_TOKEN.  A package is owned by its first publisher;
-//   only the owner (or admin) may publish new versions.
+// JSON API (the MVPKG client speaks this):
+//   GET  /package/<name>   that package's metadata (tarball = external URL)
+//   GET  /search?q=<term>  {"packages":[{name,version,description}, ...]}
+//   GET  /packages         the full index
+//
+// Provider push:
+//   POST /webhook/<id>     a release webhook; <id> is the package's tracking id
 //
 // Accounts + website:
 //   GET  /               home            GET/POST /register   GET/POST /login
 //   GET  /p/<name>       package page     POST /logout        GET /account
-//   POST /account/tokens (create) /account/tokens/revoke
+//   POST /packages (add by source URL)   POST /packages/remove
 //
 //   node server.js [port]        (default 8080; or $MVPKG_PORT)
 'use strict';
@@ -28,7 +31,7 @@ const crypto = require('crypto');
 const https = require('https');
 const querystring = require('querystring');
 const webauthn = require('./lib/webauthn');
-const github = require('./lib/github');
+const providers = require('./lib/providers');
 
 // Public base URL (for webhook URLs shown to the user); reuse the WebAuthn
 // origin in production, derive nothing useful in dev.
@@ -103,6 +106,16 @@ function loadPackage(name) {
   try { return JSON.parse(fs.readFileSync(path.join(REGDIR, name, 'meta.json'), 'utf8')); }
   catch { return null; }
 }
+function savePackage(meta) {
+  fs.mkdirSync(path.join(REGDIR, meta.name), { recursive: true });
+  fs.writeFileSync(path.join(REGDIR, meta.name, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+}
+// A package owns its release-tracking state (source, provider, webhook secret);
+// the webhook URL carries tracking.id, so find the package it belongs to.
+function findPackageByHook(id) {
+  for (const p of loadPackages()) if (p.tracking && p.tracking.id === id) return p;
+  return null;
+}
 
 // ---- users -----------------------------------------------------------
 const userPath = u => path.join(USERDIR, String(u).toLowerCase() + '.json');
@@ -154,19 +167,6 @@ function findUserByCredId(credId) {
 function waUserId(user) {
   if (!user.waId) { user.waId = crypto.randomBytes(16).toString('base64url'); saveUser(user); }
   return user.waId;
-}
-// Find a connected-repo record by its webhook id, across all users.
-function findRepoConn(id) {
-  let files; try { files = fs.readdirSync(USERDIR); } catch { return null; }
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue;
-    try {
-      const usr = JSON.parse(fs.readFileSync(path.join(USERDIR, f), 'utf8'));
-      const conn = (usr.repos || []).find(r => r.id === id);
-      if (conn) return { user: usr, conn };
-    } catch {}
-  }
-  return null;
 }
 
 // ---- sessions (stateless signed cookie) ------------------------------
@@ -316,6 +316,7 @@ function pkgPage(name, user) {
         `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : 'source')}</a>${a.external ? ' <span class="meta">— external</span>' : ''}</p>`).join('')
     : (p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '');
   const owner = p.owner ? `<p class="meta"><b>Owner:</b> ${esc(p.owner)}</p>` : '';
+  const src = p.source ? `<p class="meta"><b>Source:</b> <a href="${esc(p.source)}">${esc(p.source)}</a></p>` : '';
   const license = `<p class="meta"><b>Licence:</b> ${p.license ? esc(p.license) : '<span class="meta">unspecified</span>'}</p>`;
   // A version whose artifacts include no "source" is binary-only (commercial).
   const binaryOnly = p.artifacts && p.artifacts.length && !p.artifacts.some(a => a.kind === 'source');
@@ -323,7 +324,8 @@ function pkgPage(name, user) {
   return page(`${p.name} — mv_package`,
     `<div class="card"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span></h3><p>${esc(p.description || '')}</p></div>
      <h3>Install</h3><pre>MVPKG install ${esc(p.name)}</pre>
-     <p class="meta"><b>Dependencies:</b> ${depsHtml}</p><p class="meta"><b>Systems:</b> ${esc(sys)}</p>${license}${dist}${owner}${tar}
+     <p class="meta"><b>Dependencies:</b> ${depsHtml}</p><p class="meta"><b>Systems:</b> ${esc(sys)}</p>${license}${dist}${src}${owner}${tar}
+     <p class="meta" style="margin-top:14px">This is an index — packages are hosted at their source; downloads link out.</p>
      <p style="margin-top:22px"><a href="/">&larr; all packages</a></p>`, user);
 }
 
@@ -347,184 +349,127 @@ function accountPage(user, opts) {
   opts = opts || {};
   const mine = loadPackages().filter(p => p.owner === user.username);
   const pkgs = mine.length
-    ? mine.map(p => `<a class="card" href="/p/${esc(p.name)}" style="display:block"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span></h3></a>`).join('')
-    : '<p class="meta">You have not published any packages yet. Publish with a token below.</p>';
-  const toks = (user.tokens || []).length
-    ? (user.tokens || []).map(t => `<div class="card" style="display:flex;justify-content:space-between;align-items:center">
-        <div><b>${esc(t.name || 'token')}</b><br><span class="meta">created ${new Date(t.created).toISOString().slice(0, 10)}${t.lastUsed ? ' &middot; last used ' + new Date(t.lastUsed).toISOString().slice(0, 10) : ' &middot; never used'}</span></div>
-        <form method="post" action="/account/tokens/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(t.id)}"><button style="padding:4px 12px">Revoke</button></form></div>`).join('')
-    : '<p class="meta">No tokens yet.</p>';
-  const fresh = opts.freshToken
-    ? `<div class="msg ok">New token — copy it now, it won't be shown again:</div><div class="tok">${esc(opts.freshToken)}</div>
-       <p class="meta">Publish with it: <code>MVPKG_PUBLISH_TOKEN=&lt;token&gt; publish.sh …</code></p>`
-    : '';
+    ? mine.map(p => {
+        const t = p.tracking || {};
+        const track = t.hookId ? 'auto-updating on release &#10003;' : (t.provider ? 'tracked (polling)' : 'not tracked');
+        return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div>
+          <b><a href="/p/${esc(p.name)}">${esc(p.name)}</a></b> <span class="v">${esc(p.version || '—')}</span><br>
+          <span class="meta">source: ${p.source ? '<a href="' + esc(p.source) + '">' + esc(p.source) + '</a>' : 'unknown'}</span><br>
+          <span class="meta">releases: ${esc(track)}</span></div>
+          <form method="post" action="/packages/remove" style="margin:0" onsubmit="return confirm('Remove ${esc(p.name)} from the index?')"><input type="hidden" name="name" value="${esc(p.name)}"><button style="padding:4px 12px">Remove</button></form></div></div>`;
+      }).join('')
+    : '<p class="meta">No packages yet — add one below by pasting its source URL.</p>';
   const adminBadge = isAdminUser(user) ? ' <span class="badge" style="border-color:var(--acc);color:var(--acc)">admin</span>' : '';
   const pks = (user.passkeys || []).length
     ? (user.passkeys || []).map(p => `<div class="card" style="display:flex;justify-content:space-between;align-items:center">
         <div><b>${esc(p.name || 'passkey')}</b> <span class="badge">${esc(p.kind || 'ec')}</span><br><span class="meta">added ${new Date(p.created).toISOString().slice(0, 10)}${p.lastUsed ? ' &middot; last used ' + new Date(p.lastUsed).toISOString().slice(0, 10) : ''}</span></div>
         <form method="post" action="/account/passkeys/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(p.credId)}"><button style="padding:4px 12px">Remove</button></form></div>`).join('')
     : '<p class="meta">No passkeys yet.</p>';
-  const repos = (user.repos || []).length
-    ? (user.repos || []).map(r => `<div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start"><div>
-          <b>${esc(r.repo)}</b>${r.package ? ' &rarr; <code>' + esc(r.package) + '</code>' : ''}<br>
-          <span class="meta">latest release: ${r.latest ? esc(r.latest.tag) + ' &middot; ' + new Date(r.latest.at).toISOString().slice(0, 10) + (r.latest.html ? ' &middot; <a href="' + esc(r.latest.html) + '">view</a>' : '') : 'none detected yet'}</span><br>
-          <span class="meta">webhook: ${r.hookId ? '<span style="color:var(--acc)">installed on GitHub &#10003;</span>' : (r.repo ? '<code>' + esc(BASE_URL) + '/webhook/github/' + esc(r.id) + '</code> (add manually)' : 'n/a — not a GitHub repo')}</span></div>
-          <form method="post" action="/account/repos/remove" style="margin:0"><input type="hidden" name="id" value="${esc(r.id)}"><button style="padding:4px 12px">Disconnect</button></form></div></div>`).join('')
-    : '<p class="meta">No repositories connected.</p>';
-  const fh = opts.freshHook;
-  const hookMsg = !fh ? ''
-    : opts.hookInstalled
-      ? `<div class="msg ok">Connected <b>${esc(fh.repo || fh.source || '')}</b>${fh.package ? ' &rarr; <code>' + esc(fh.package) + '</code>' : ''} — the release webhook was installed on GitHub automatically. New releases appear here as they publish.</div>`
-      : `<div class="msg ok">Connected <b>${esc(fh.repo || fh.source || '')}</b>${fh.package ? ' &rarr; <code>' + esc(fh.package) + '</code>' : ''}.${opts.hookNote ? ' <span class="meta">' + esc(opts.hookNote) + '</span>' : ''}</div>` +
-        (fh.repo ? `<p class="meta">Couldn't auto-install the webhook — add it in GitHub → Settings → Webhooks: Payload URL <code>${esc(BASE_URL)}/webhook/github/${esc(fh.id)}</code> &middot; Content type <code>application/json</code> &middot; event: Releases. Secret (copy now):</p><div class="tok">${esc(fh.secret)}</div>` : '');
-  const repoErr = opts.repoError ? `<div class="msg err">${esc(opts.repoError)}</div>` : '';
+  const a = opts.added;
+  const addMsg = a
+    ? `<div class="msg ok">Added <code>${esc(a.name)}</code>${a.installed ? ' — release tracking installed; new releases appear here automatically.' : (a.note ? ' — <span class="meta">' + esc(a.note) + '</span>' : '')}</div>`
+    : '';
+  const addErr = opts.addError ? `<div class="msg err">${esc(opts.addError)}</div>` : '';
   return page('Account — mv_package',
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
      <h3 style="margin-top:24px">Passkeys</h3>${pks}
      <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
-     <h3 style="margin-top:24px">GitHub repositories</h3>${hookMsg}${repoErr}${repos}
-     <form method="post" action="/account/repos" style="margin-top:14px">
-       <label>Paste a GitHub repo URL, <code>owner/repo</code>, or a link to an <code>mvpkg.json</code></label>
-       <input type="text" name="source" placeholder="https://github.com/mvx-lang/mv_git   —   or   mvx-lang/udt_curses">
-       <label>Package name <span class="meta">(optional — read from mvpkg.json when present)</span></label>
-       <input type="text" name="package" placeholder="mv-lang/curses">
-       <div style="margin-top:10px"><button class="primary" type="submit">Connect</button></div>
+     <h3 style="margin-top:24px">Your packages</h3>${addMsg}${addErr}${pkgs}
+     <form method="post" action="/packages" style="margin-top:14px">
+       <label>Add a package — paste its <b>source URL</b> (a repository, or a link to its <code>mvpkg.json</code>)</label>
+       <input type="text" name="source" placeholder="https://&hellip;/your-package   &middot;   or a link to its mvpkg.json" required>
+       <label>Package name <span class="meta">(optional &mdash; read from mvpkg.json)</span></label>
+       <input type="text" name="package" placeholder="mv-lang/git">
+       <div style="margin-top:10px"><button class="primary" type="submit">Add package</button></div>
      </form>
-     <p class="meta">A GitHub repo gets its release webhook installed automatically; new releases are indexed here as they publish.</p>
-     <h3 style="margin-top:24px">Your packages</h3>${pkgs}
-     <h3 style="margin-top:24px">Publish tokens</h3>${fresh}${toks}
-     <form method="post" action="/account/tokens" style="margin-top:14px">
-       <label>New token name (e.g. "ci", "laptop")</label><input type="text" name="name" placeholder="token name">
-       <div style="margin-top:10px"><button class="primary" type="submit">Create token</button></div>
-     </form>`, user);
+     <p class="meta">The registry indexes your package and tracks its releases &mdash; it hosts nothing; downloads come from the source.</p>`, user);
 }
 
-// ---- publish ---------------------------------------------------------
-// Upsert one artifact into a package's meta.json: create or merge the version,
-// dedupe by artifact key, keep `source` as the default tarball, and track the
-// systems.  Owner is preserved across re-publishes.  Shared by publish() (an
-// upload or reference) and the GitHub release indexer.  Writes meta.json only —
-// callers that host bytes write the tar themselves.
-function upsertArtifact(opts) {
-  const existing = loadPackage(opts.name);
-  const ownerName = (existing && existing.owner) || opts.owner || 'admin';
-  let meta = (existing && existing.version === opts.version) ? existing
-    : { name: opts.name, version: opts.version, owner: ownerName, description: '', dependencies: '', license: '', systems: [], artifacts: [], tarball: '', published: Date.now() };
-  meta.owner = ownerName;
-  if (opts.description) meta.description = opts.description;
-  if (opts.dependencies) meta.dependencies = opts.dependencies;
-  if (opts.license) meta.license = opts.license;
-  const art = opts.kind === 'binary'
-    ? { kind: 'binary', system: opts.system, os: opts.os, arch: opts.arch, endian: opts.endian, tarball: opts.tarball }
-    : { kind: 'source', tarball: opts.tarball };
-  if (opts.external) art.external = true;
-  meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.os === art.os && a.arch === art.arch && a.endian === art.endian));
-  meta.artifacts.push(art);
-  const src = meta.artifacts.find(a => a.kind === 'source');
-  meta.tarball = src ? src.tarball : opts.tarball;   // default (unselected) = source
-  const declared = Array.isArray(opts.systems) ? opts.systems
-    : (opts.systems ? String(opts.systems).split(/[,\s]+/).filter(Boolean) : []);
-  meta.systems = [...new Set([...(meta.systems || []), ...declared, ...meta.artifacts.filter(a => a.kind === 'binary').map(a => a.system)])];
-  fs.mkdirSync(path.join(REGDIR, opts.name), { recursive: true });
-  fs.writeFileSync(path.join(REGDIR, opts.name, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
-  return meta;
-}
+// ---- packages: a source-tracked index (no hosting) ------------------
+// A package is added from a source URL; a provider reads its mvpkg.json and
+// finds its releases, whose assets are recorded as external artifact URLs.
+// Release assets follow `<base>-<version>-<suffix>.tar.gz` (base = name with
+// '/'->'_', suffix "source" or "<system>-<os>-<arch>-<endian>").
 
-// Index a GitHub release's assets as external artifacts on the connected
-// package — the registry links the asset URLs, GitHub keeps the bytes.  Asset
-// names follow the release convention `<base>-<version>-<suffix>.tar.gz`, where
-// base is the package name with '/'->'_' and suffix is "source" or
-// "<system>-<os>-<arch>-<endian>".  Returns how many assets were indexed.
-function indexRelease(conn, rel, ownerUsername) {
-  const pkg = conn && conn.package;
-  if (!pkg || !okName(pkg)) return 0;
-  const version = String(rel.tag || '').replace(/^v/, '');
-  if (!version) return 0;
-  const prefix = `${pkg.replace(/\//g, '_')}-${version}-`;
-  let n = 0;
+// Index a release's assets onto a package: refresh version + artifacts (all
+// external), keep source/tracking/owner.  Returns how many assets were indexed.
+function indexRelease(pkg, rel) {
+  if (!rel || !rel.version) return 0;
+  const version = rel.version;
+  const prefix = `${pkg.name.replace(/\//g, '_')}-${version}-`;
+  const arts = [];
   for (const asset of (rel.assets || [])) {
     const an = asset.name || '';
     if (!asset.url || !an.endsWith('.tar.gz') || !an.startsWith(prefix)) continue;
     const suffix = an.slice(prefix.length, -'.tar.gz'.length);
-    let spec;
-    if (suffix === 'source') spec = { kind: 'source' };
+    if (suffix === 'source') arts.push({ kind: 'source', tarball: asset.url, external: true });
     else {
       const p = suffix.split('-');
-      if (p.length !== 4) continue;                    // not the <sys>-<os>-<arch>-<endian> shape
-      spec = { kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3] };
+      if (p.length === 4) arts.push({ kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3], tarball: asset.url, external: true });
     }
-    const man = conn.manifest || {};
-    upsertArtifact({ name: pkg, version, owner: ownerUsername, tarball: asset.url, external: true, ...spec,
-      description: man.description, license: man.license, dependencies: man.dependencies, systems: man.systems });
-    n++;
   }
-  return n;
+  if (!arts.length) return 0;                          // nothing recognisable in this release
+  pkg.version = version;
+  pkg.artifacts = arts;
+  const src = arts.find(a => a.kind === 'source');
+  pkg.tarball = src ? src.tarball : (arts[0] ? arts[0].tarball : '');
+  pkg.systems = [...new Set([...(pkg.systems || []), ...arts.filter(a => a.kind === 'binary').map(a => a.system)])];
+  pkg.updated = Date.now();
+  if (pkg.tracking) pkg.tracking.latest = { version, tag: rel.tag, at: rel.at, html: rel.html, seenAt: Date.now() };
+  savePackage(pkg);
+  return arts.length;
 }
 
-function publish(req, res, q) {
-  const h = req.headers;
-  const field = (hk, qk) => (h[hk] != null ? String(h[hk]) : String(q[qk] || ''));
-  const tok = h['x-auth-token'] || q.token || '';
-  const user = findUserByToken(tok);
-  const isAdmin = (ADMIN_TOKEN && tok === ADMIN_TOKEN) || isAdminUser(user);
-  if (!isAdmin && !user) return sendJSON(res, 401, { error: 'bad or missing token (see /account)' });
+// Add or refresh a package from a pasted source URL: resolve the provider, read
+// mvpkg.json for the name + metadata, record the source, install push tracking
+// where supported (a webhook), and index the current release.
+// cb(err, { name, installed, note }).
+function addPackage(user, source, pkgOverride, cb) {
+  const resolved = providers.resolve(String(source || '').trim());
+  if (!resolved) return cb(new Error('Unrecognised source — paste a repository URL or a link to an mvpkg.json.'));
+  const { provider, ref } = resolved;
+  provider.fetchManifest(ref, (e, manifestText) => {
+    let name = String(pkgOverride || '').trim();
+    let man = {};
+    if (manifestText) { try {
+      const j = JSON.parse(manifestText);
+      if (!name && j.name) name = String(j.name);
+      man = { description: j.description || '', license: j.license || '',
+        dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
+        systems: Array.isArray(j.systems) ? j.systems : [] };
+    } catch {} }
+    if (!name || !okName(name))
+      return cb(new Error('Could not read the package name — the source needs an mvpkg.json with a "name", or specify the name.'));
+    const existing = loadPackage(name);
+    if (existing && existing.owner && existing.owner !== user.username && !isAdminUser(user))
+      return cb(new Error(`package "${name}" is owned by ${existing.owner}`));
 
-  const name = field('x-pkg-name', 'name'), version = field('x-pkg-version', 'version');
-  if (!okName(name) || !version) return sendJSON(res, 400, { error: 'valid name and version required' });
+    const meta = existing || { name, owner: user.username, artifacts: [], version: '', added: Date.now() };
+    meta.owner = meta.owner || user.username;
+    meta.source = provider.sourceUrl(ref);
+    if (man.description) meta.description = man.description;
+    if (man.license) meta.license = man.license;
+    if (man.dependencies) meta.dependencies = man.dependencies;
+    if (man.systems && man.systems.length) meta.systems = [...new Set([...(meta.systems || []), ...man.systems])];
+    meta.tracking = meta.tracking || { id: crypto.randomBytes(6).toString('hex'), secret: crypto.randomBytes(24).toString('base64url'), hookId: null, latest: null };
+    meta.tracking.provider = provider.name;
+    meta.tracking.ref = ref;
+    meta.updated = Date.now();
+    savePackage(meta);
 
-  const existing = loadPackage(name);
-  const publisher = user ? user.username : null;
-  if (existing && existing.owner && !isAdmin && existing.owner !== publisher)
-    return sendJSON(res, 403, { error: `package "${name}" is owned by ${existing.owner}` });
-  // preserve the owner on re-publish; a new package is owned by its publisher
-  const ownerName = (existing && existing.owner) || publisher || field('x-pkg-owner', 'owner') || 'admin';
+    const indexLatest = (installed, note) => provider.latestRelease(ref, (e2, rel) => {
+      if (!e2 && rel) { const fresh = loadPackage(name); if (fresh) indexRelease(fresh, rel); }
+      cb(null, { name, installed, note });
+    });
 
-  // Which artifact this upload is: "source" (default) or
-  // "binary:<system>:<os>:<arch>:<endian>".  Native code is locked to the OS
-  // (linux/windows/aix — ELF vs DLL vs XCOFF) and the CPU arch; compiled BASIC
-  // objects + data files are locked only to endianness.  A pure-BASIC binary
-  // is os="any" arch="any" (endian-locked, portable across same-endian hosts);
-  // a native one names a real os + arch.
-  const aParts = String(field('x-pkg-artifact', 'artifact') || 'source').split(':');
-  const kind = aParts[0] === 'binary' ? 'binary' : 'source';
-  const aSystem = aParts[1] || 'any', aOs = aParts[2] || 'any', aArch = aParts[3] || 'any', aEndian = aParts[4] || 'any';
-  const suffix = kind === 'binary' ? `${aSystem}-${aOs}-${aArch}-${aEndian}` : 'source';
-
-  // Two ways to publish an artifact:
-  //   upload    — the tar is the request body; the registry hosts it.
-  //   reference — X-Pkg-Url names an external http(s) location (a vendor's
-  //               server, a GitHub release asset, …) and the registry only
-  //               indexes it.  This is how a binary-only / commercial package
-  //               is served without handing its bytes to the registry.
-  const extUrl = field('x-pkg-url', 'url').trim();
-  const isExt = /^https?:\/\//i.test(extUrl);
-
-  readBody(req, buf => {
-    if (!isExt && !buf.length) return sendJSON(res, 400, { error: 'empty body (expected tar.gz, or set X-Pkg-Url)' });
-    const base = name.split('/').pop();
-    const dir = path.join(REGDIR, name);
-    const tarName = `${base}-${version}-${suffix}.tar.gz`;
-    const tarball = isExt ? extUrl : `/tarball/${name}/${tarName}`;
-
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-      if (!isExt) fs.writeFileSync(path.join(dir, tarName), buf);
-      // Merge artifacts into the same version; a new version starts fresh.
-      // (SPDX licence is author-set via the manifest; the registry may also
-      // fill it from a linked GitHub repo.)
-      upsertArtifact({
-        name, version, owner: ownerName,
-        description: field('x-pkg-description', 'description'),
-        dependencies: field('x-pkg-dependencies', 'dependencies'),
-        license: field('x-pkg-license', 'license'),
-        systems: field('x-pkg-systems', 'systems'),
-        kind, system: aSystem, os: aOs, arch: aArch, endian: aEndian,
-        tarball, external: isExt,
+    if (provider.supportsTracking) {
+      provider.installTracking(ref, { hookUrl: `${BASE_URL}/webhook/${meta.tracking.id}`, secret: meta.tracking.secret }, (herr, hook) => {
+        if (hook) { const fresh = loadPackage(name); if (fresh && fresh.tracking) { fresh.tracking.hookId = hook.id || null; savePackage(fresh); } }
+        indexLatest(!herr && !!hook, herr ? herr.message : null);
       });
-    } catch (e) { return sendJSON(res, 500, { error: 'write failed: ' + e.message }); }
-    console.log(`published ${name} ${version} [${suffix}] by ${ownerName} (${isExt ? 'ref ' + extUrl : buf.length + ' bytes'})`);
-    sendJSON(res, 200, { ok: true, name, version, owner: ownerName, artifact: suffix, external: isExt || undefined });
+    } else {
+      indexLatest(false, 'Releases are picked up by polling (this source has no push webhook).');
+    }
   });
 }
 
@@ -590,24 +535,21 @@ const server = http.createServer((req, res) => {
   const user = sessionUser(req);
 
   if (req.method === 'POST') {
-    if (parts[0] === 'publish') return publish(req, res, u.query);
     return readBody(req, buf => {
-      // GitHub webhook — verify the HMAC over the RAW body, record releases
-      if (parts[0] === 'webhook' && parts[1] === 'github' && parts[2]) {
-        const found = findRepoConn(parts[2]);
-        if (!found) { res.writeHead(404); return res.end('unknown hook'); }
-        if (!github.verifyWebhook(found.conn.secret, req.headers['x-hub-signature-256'], buf)) { res.writeHead(401); return res.end('bad signature'); }
-        const event = req.headers['x-github-event'];
-        if (event === 'ping') return sendJSON(res, 200, { ok: true });
-        if (event === 'release') {
-          let p; try { p = JSON.parse(buf.toString()); } catch { p = null; }
-          if (p && p.release && ['published', 'released', 'created'].includes(p.action)) {
-            const info = github.releaseInfo(p.release); info.seenAt = Date.now();
-            found.conn.latest = info;
-            const n = indexRelease(found.conn, info, found.user.username);
-            saveUser(found.user);
-            console.log(`webhook: ${found.conn.repo} release ${info.tag} -> indexed ${n} artifact(s) in ${found.conn.package || '(no package set)'}`);
-          }
+      // Provider push (release webhook) — the URL carries the package's
+      // tracking id; the provider verifies the signature and parses the event.
+      if (parts[0] === 'webhook' && parts[1]) {
+        const pkg = findPackageByHook(parts[1]);
+        if (!pkg || !pkg.tracking) { res.writeHead(404); return res.end('unknown hook'); }
+        const prov = providers.byName(pkg.tracking.provider);
+        if (!prov) { res.writeHead(404); return res.end('unknown provider'); }
+        const v = prov.verifyEvent(pkg.tracking.secret, req.headers, buf);
+        if (!v.valid) { res.writeHead(401); return res.end('bad signature'); }
+        if (v.ping) return sendJSON(res, 200, { ok: true });
+        if (v.release) {
+          const fresh = loadPackage(pkg.name);
+          const n = fresh ? indexRelease(fresh, v.release) : 0;
+          console.log(`webhook: ${pkg.name} <- ${prov.name} release ${v.release.tag} (indexed ${n})`);
         }
         return sendJSON(res, 200, { ok: true });
       }
@@ -644,67 +586,28 @@ const server = http.createServer((req, res) => {
         user.passkeys = (user.passkeys || []).filter(p => p.credId !== form.id);
         saveUser(user); return redirect(res, '/account');
       }
-      if (u.pathname === '/account/repos') {
+      // Add a package by pasting its source URL (repo or mvpkg.json).  The
+      // provider reads the manifest, records the source, installs release
+      // tracking where it can, and indexes the current release.
+      if (u.pathname === '/packages') {
         if (!user) return redirect(res, '/login');
-        // Accept a pasted URL: a GitHub repo URL, bare owner/repo, a blob/raw
-        // URL, or a link to an mvpkg.json.  Derive the repo + read the manifest.
-        const input = String(form.source || form.repo || '').trim();
-        const parsed = github.parseConnect(input);
-        if (!parsed.repo && !parsed.mvpkgUrl)
-          return sendHTML(res, 400, accountPage(user, { repoError: 'Paste a GitHub repo URL, owner/repo, or a link to an mvpkg.json.' }));
-
-        const gotManifest = (manifestText) => {
-          let pkgName = String(form.package || '').trim();
-          let manifest = null;
-          if (manifestText) { try {
-            const j = JSON.parse(manifestText);
-            if (!pkgName && j.name) pkgName = String(j.name);
-            manifest = {
-              description: j.description || '', license: j.license || '',
-              dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
-              systems: Array.isArray(j.systems) ? j.systems : [],
-            };
-          } catch {} }
-          if (pkgName && !okName(pkgName)) pkgName = '';
-          if (!pkgName)
-            return sendHTML(res, 400, accountPage(user, { repoError: 'Could not determine the package name — add an mvpkg.json with a "name", or fill in the package field.' }));
-
-          user.repos = user.repos || [];
-          const conn = { id: crypto.randomBytes(6).toString('hex'), repo: parsed.repo || '', source: input,
-            package: pkgName, manifest, secret: crypto.randomBytes(24).toString('base64url'),
-            latest: null, hookId: null, added: Date.now() };
-          user.repos.push(conn); saveUser(user);
-
-          const finish = (installed, note) => {
-            // index the current release right away (also caught by webhook/poll)
-            if (parsed.repo) github.latestRelease(parsed.repo, (e, rel) => {
-              if (e || !rel) return;
-              const u3 = loadUser(user.username); const c3 = (u3.repos || []).find(x => x.id === conn.id);
-              if (c3) { rel.seenAt = Date.now(); c3.latest = rel; indexRelease(c3, rel, u3.username); saveUser(u3); }
-            });
-            return sendHTML(res, 200, accountPage(loadUser(user.username), { freshHook: conn, hookInstalled: installed, hookNote: note }));
-          };
-
-          if (parsed.repo) {
-            github.createWebhook(parsed.repo, `${BASE_URL}/webhook/github/${conn.id}`, conn.secret, (herr, hook) => {
-              if (hook) { const u2 = loadUser(user.username); const c2 = (u2.repos || []).find(x => x.id === conn.id); if (c2) { c2.hookId = hook.id || null; saveUser(u2); } }
-              finish(!herr && !!hook, herr ? herr.message : null);
-            });
-          } else {
-            finish(false, 'Registered from the manifest (not a GitHub repo, so releases are not auto-tracked).');
-          }
-        };
-
-        if (parsed.repo) github.repoFile(parsed.repo, (parsed.file && /mvpkg\.json$/i.test(parsed.file)) ? parsed.file : 'mvpkg.json', (e, t) => gotManifest(t));
-        else github.fetchUrl(parsed.mvpkgUrl, (e, t) => gotManifest(t));
-        return;                                          // response sent asynchronously above
+        addPackage(user, form.source, form.package, (err, r) => {
+          if (err) return sendHTML(res, 400, accountPage(user, { addError: err.message }));
+          return sendHTML(res, 200, accountPage(loadUser(user.username), { added: r }));
+        });
+        return;                                          // response sent asynchronously
       }
-      if (u.pathname === '/account/repos/remove') {
+      if (u.pathname === '/packages/remove') {
         if (!user) return redirect(res, '/login');
-        const conn = (user.repos || []).find(r => r.id === form.id);
-        if (conn && conn.repo && conn.hookId) github.deleteWebhook(conn.repo, conn.hookId, () => {});
-        user.repos = (user.repos || []).filter(r => r.id !== form.id);
-        saveUser(user); return redirect(res, '/account');
+        const pkg = loadPackage(String(form.name || '').trim());
+        if (pkg && (pkg.owner === user.username || isAdminUser(user))) {
+          if (pkg.tracking && pkg.tracking.hookId) {
+            const prov = providers.byName(pkg.tracking.provider);
+            if (prov && prov.removeTracking) prov.removeTracking(pkg.tracking.ref, { hookId: pkg.tracking.hookId }, () => {});
+          }
+          try { fs.rmSync(path.join(REGDIR, pkg.name), { recursive: true, force: true }); } catch {}
+        }
+        return redirect(res, '/account');
       }
       if (u.pathname === '/register') return handleRegister(req, res, form);
       if (u.pathname === '/login') return handleLogin(req, res, form);
@@ -779,41 +682,30 @@ const server = http.createServer((req, res) => {
       .map(p => ({ name: p.name, version: p.version, description: p.description || '' }));
     return sendJSON(res, 200, { packages: hits });
   }
-  if (parts[0] === 'tarball' && parts[1]) {
-    const file = path.normalize(parts.slice(1).join('/'));
-    if (file.startsWith('..')) { res.writeHead(400); return res.end('bad path'); }
-    return fs.readFile(path.join(REGDIR, file), (err, data) => {
-      if (err) { res.writeHead(404); return res.end('not found'); }
-      res.writeHead(200, { 'Content-Type': 'application/gzip', 'Content-Length': data.length });
-      res.end(data);
-    });
-  }
   if (parts[0] === 'packages') return sendJSON(res, 200, { packages: loadPackages() });
 
   res.writeHead(404); res.end('not found');
 });
 
 server.listen(PORT, () => {
-  console.log(`mv_package registry on http://0.0.0.0:${PORT}  (registry: ${REGDIR})`);
-  console.log(`  accounts enabled; publish needs a per-user token${ADMIN_TOKEN ? ' or the admin token' : ''}`);
+  console.log(`mv_package registry on http://0.0.0.0:${PORT}  (index: ${REGDIR})`);
+  console.log('  a package is added from its source URL; the registry hosts nothing.');
 });
 
-// Poll connected repos for new releases — a fallback to the webhook, and how
-// releases are picked up when no webhook is configured.
+// Poll tracked packages for new releases — the fallback to a webhook, and how
+// providers without push tracking (e.g. GitLab for now) are picked up at all.
 const POLL_MS = Number(process.env.GITHUB_POLL_MS || 15 * 60 * 1000);
 if (POLL_MS > 0) setInterval(() => {
-  let files; try { files = fs.readdirSync(USERDIR); } catch { return; }
-  for (const f of files) {
-    if (!f.endsWith('.json')) continue;
-    let usr; try { usr = JSON.parse(fs.readFileSync(path.join(USERDIR, f), 'utf8')); } catch { continue; }
-    for (const conn of (usr.repos || [])) {
-      github.latestRelease(conn.repo, (e, rel) => {
-        if (e || !rel) return;
-        if (!conn.latest || conn.latest.tag !== rel.tag) {
-          const u2 = loadUser(usr.username); const c2 = (u2.repos || []).find(x => x.id === conn.id);
-          if (c2) { rel.seenAt = Date.now(); c2.latest = rel; const n = indexRelease(c2, rel, u2.username); saveUser(u2); console.log(`poll: ${conn.repo} -> ${rel.tag} (indexed ${n} artifact(s))`); }
-        }
-      });
-    }
+  for (const pkg of loadPackages()) {
+    if (!pkg.tracking || !pkg.tracking.provider) continue;
+    const prov = providers.byName(pkg.tracking.provider);
+    if (!prov) continue;
+    prov.latestRelease(pkg.tracking.ref, (e, rel) => {
+      if (e || !rel || !rel.version) return;
+      const seen = pkg.tracking.latest && pkg.tracking.latest.version;
+      if (seen === rel.version) return;
+      const fresh = loadPackage(pkg.name);
+      if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`poll: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
+    });
   }
 }, POLL_MS).unref();
