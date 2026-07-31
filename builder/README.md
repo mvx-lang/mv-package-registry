@@ -39,31 +39,26 @@ needed), compiles BASIC, and runs the native build toolchain
 
 ## Use it
 
-Run a package's release build — produce **two** artifacts (a portable
-`source` tar and a `binary` tar with the native bridge precompiled for this
-builder's system + architecture) and publish both to a registry:
+A **package repo's release workflow** drives this image to compile its native
+bridge and attach the result to a **GitHub release** (the registry then indexes
+that asset — it hosts nothing).  The workflow just runs the container to build
+the per-arch binary tar, e.g. (from `udt_curses`'s `release.yml`):
 
 ```sh
-docker run --rm --hostname unidata --shm-size=512m \
-  -e MVPKG_REGISTRY=https://mv-package.heydon.io \
-  -e MVPKG_PUBLISH_TOKEN=... \
-  -v /path/to/udt_curses:/pkg \
-  -v /path/to/mv-package-registry:/registry \
-  -v "$PWD/releases:/out" \
-  udt-builder:8.3.2 bash /registry/builder/build-release.sh mv-lang/curses 1.0
+docker run --rm -v "$PWD":/src -w /src udt-builder:8.3.2 bash -lc '
+  cp -a . /tmp/stage && rm -rf /tmp/stage/.git
+  for c in /tmp/stage/udt-callc/*.c; do gcc -m64 -fPIC -O2 -c "$c" -o "${c%.c}.o"; rm -f "$c"; done
+  tar czf /src/mv-lang_curses-<ver>-udt-linux-x86_64-le.tar.gz -C /tmp/stage .'
 ```
 
-produces `releases/mv-lang_curses-1.0-source.tar.gz` and
-`releases/mv-lang_curses-1.0-udt-x86_64.tar.gz`, then publishes them against
-the same version. The registry serves `source` by default and the matching
-binary when `MVPKG install` sends its `system` + `arch`.
+The asset is named `<name-with-_>-<version>-<system>-<os>-<arch>-<endian>.tar.gz`
+so the registry maps it (native binaries are os+arch-locked).  See `mv_git`'s
+and `udt_curses`'s `release` workflows for the full jobs (checkout → build in
+this container → publish the GitHub release).
 
-- **System** defaults to `udt` — override with `MVPKG_SYSTEM` for a different
-  MV platform.
 - **Architecture** is `$(uname -m)` — `x86_64` on an Intel builder,
-  `aarch64` on an ARM builder. To ship an ARM binary, run the same command on
-  an ARM UniData builder; the source tar is identical, so publish it from
-  whichever builder runs first.
+  `aarch64` on an ARM builder. To ship an ARM binary, run the workflow on an
+  ARM builder too; each release just adds another per-arch asset.
 
 Or get an interactive UniData shell for development:
 
@@ -110,7 +105,6 @@ transcript against the bundled `demo` account.
 Dockerfile          Rocky 8 + deps + the captured UniData install
 capture-install.sh  pull a licensed install into ud83.tar.gz (git-ignored)
 entrypoint.sh       start UniData, then exec the requested command
-build-release.sh    build + publish a release: source tar + per-arch binary tar
 setup-runner.sh     register a self-hosted GitHub Actions runner (org-level)
 setup-udt-server.sh configure the container as a UniObjects server (for demos)
 ```

@@ -65,77 +65,72 @@ deploys into that account.
 
 ## The registry (`server.js`)
 
-A dependency-free Node.js registry and website. Packages live under
-`registry/<name>/` as a `meta.json` beside the release tar it points at.
+A dependency-free Node.js **index** — it hosts nothing.  A package is added
+from its source URL; a **provider** reads the package's `mvpkg.json`, tracks its
+releases, and each release asset is recorded as an **external download URL**.
+Packages live under `registry/<name>/meta.json` (source, provider, tracking,
+and the external artifact URLs).
 
 JSON API (the `MVPKG` client speaks this):
 
 ```
-GET  /package/<name>   that package's metadata
+GET  /package/<name>   metadata; `tarball` resolved to the artifact URL best
+                       matching ?system=&os=&arch=&endian=  (else the source)
 GET  /search?q=<term>  {"packages":[{name,version,description}, ...]}
-GET  /tarball/<n>/<f>  the release tar bytes
+GET  /packages         the full index
 ```
 
-Website:
+Website + account:
 
 ```
 GET  /                 home: search + package list
-GET  /p/<name>         package page (install command, dependencies, download)
+GET  /p/<name>         package page (install command, source, downloads)
+GET  /account          your packages + add a package by source URL
+POST /packages         add a package (source URL)   POST /packages/remove
+POST /webhook/<id>     a provider release webhook (id = the package's tracking id)
 ```
 
-Publish (token-gated when `MVPKG_PUBLISH_TOKEN` is set; metadata as `X-Pkg-*`
-headers, body = the tar):
+## Adding a package
 
-```
-POST /publish
-```
+In your account, paste a **source URL** — a repository, or a link to an
+`mvpkg.json`.  A source provider ([`lib/providers.js`](lib/providers.js))
+handles it:
+
+- **github** — reads `mvpkg.json` via the Contents API, tracks releases, and
+  **auto-installs a release webhook** (needs a `GITHUB_TOKEN` with
+  `admin:repo_hook`; otherwise it polls).
+- **gitlab** — manifest + releases via the API (poll-based).
+- **manifest** — any `mvpkg.json` URL (metadata only).
+
+The registry reads the name + description/licence/dependencies from the
+manifest, records the source, and indexes the current release.  On each new
+release (webhook or poll) it refreshes the version and the external artifact
+URLs.  It stores no bytes — downloads come from the source.
+
+## Releases
+
+A package repo publishes its own releases — e.g. a **GitHub release** whose
+assets are named `<name-with-_>-<version>-<system>-<os>-<arch>-<endian>.tar.gz`
+for a native binary (or `…-source.tar.gz`).  The registry indexes those assets
+as external artifacts, and `GET /package/<name>?system=&os=&arch=&endian=`
+returns the matching one — native binaries are os+arch-locked, compiled BASIC
+objects + data files are endian-locked — falling back to source.
+
+UniData packages that ship a native bridge compile it in the `builder/`
+container inside their release workflow — see [`builder/README.md`](builder/README.md)
+and, for worked examples, `mv_git`'s and `udt_curses`'s `release` workflows.
 
 ## Run / deploy
 
 ```sh
-node server.js 8080                                   # local dev
+node server.js 8080                    # local dev
+docker compose up -d --build           # container (persistent data volume + .env)
 ```
 
-or the container (persistent `registry/` data volume, publish token in
-`.env`):
-
-```sh
-docker compose up -d --build
-```
-
-The live site runs this container on the hosting VM, fronted by an external
-Traefik that terminates TLS for `mv-package.heydon.io`.
-
-## Build + publish a release
-
-A release can carry more than one artifact for the same version: a portable
-**source** tar plus one **binary** tar per `system`/`os`/`arch` (native code
-precompiled, so the client installs it without a compiler). The
-`X-Pkg-Artifact` header tags each upload — `source` (default) or
-`binary:<system>:<os>:<arch>:<endian>`:
-
-```sh
-./mkrelease.sh /path/to/account <name> <version> "<description>" [deps]
-./publish.sh https://mv-package.heydon.io <tar> <name> <version> "<desc>" [deps] [systems] [artifact]
-```
-
-`GET /package/<name>` returns the source tar by default and the matching
-binary when the client sends `?system=&os=&arch=&endian=` (the `MVPKG` client
-does this automatically from its `MVPKGOS "PLATFORM"` op). Native binaries are
-locked to os+arch; compiled BASIC objects + data files, to endianness. The
-website package page lists every artifact.
-
-**External / binary-only sources.** Instead of uploading a tar, pass an
-`http(s)://` URL as `<tar>` and the registry just **indexes** that external
-location (a vendor's server, a GitHub release asset) — no bytes uploaded. This
-is how a **binary-only, commercial** package is served: the registry holds its
-name, licence, and download URL; the client fetches from wherever the artifact
-points. A version with no `source` artifact is shown as **binary only**.
-
-For UniData packages whose native bridge must compile, `builder/` is a
-disposable UniData image that builds **both** artifacts (source + a binary
-for the builder's `system`/`$(uname -m)`) and publishes them — see
-[`builder/README.md`](builder/README.md).
+The live site runs the container on the hosting VM behind Traefik
+(`mv-package.heydon.io`).  `.env`: optional `GITHUB_TOKEN` (webhook
+auto-install + higher API limits), `MVPKG_ADMIN_USERS`,
+`WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN`, and the Turnstile keys.
 
 ## Test
 
@@ -147,42 +142,34 @@ MVX_HOME=/path/to/mvx-lang MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
 
 ## Roadmap
 
-The registry is growing from a file-backed service into an application:
-
 - **User registration & auth** — **done.** Register/sign-in, sessions, and
-  per-user publish tokens (managed at `/account`). A package is owned by its
-  first publisher; only the owner (or an admin — `MVPKG_ADMIN_USERS`, or the
-  `MVPKG_PUBLISH_TOKEN`) may publish new versions. **Passkeys (WebAuthn)** —
-  **done**, add/sign-in from `/account` and `/login`; dependency-free (own
+  **passkeys (WebAuthn)** at `/account` and `/login`; dependency-free (own
   CBOR/COSE parsing + `crypto` verification in [`lib/webauthn.js`](lib/webauthn.js)).
-  Set `WEBAUTHN_RP_ID` + `WEBAUTHN_ORIGIN` in production. Registration is
-  guarded by **Cloudflare Turnstile** (CAPTCHA) when `TURNSTILE_SITEKEY` +
-  `TURNSTILE_SECRET` are set (off otherwise).
-- **GitHub integration** — **done.** Connect a repo to your account
-  (`/account`), optionally naming a target package. The registry monitors it
-  two ways: a **webhook** (`/webhook/github/<id>`, HMAC-verified with a
-  per-connection secret) for instant release events, and **polling** the
-  GitHub API (`GITHUB_TOKEN` for private/rate-limits) as a fallback. The
-  latest release shows on the account page. Dependency-free
-  ([`lib/github.js`](lib/github.js)).
-- **Multi-artifact releases** — **done.** A release version carries a source
-  tar plus a binary tar per `system`/`arch`; `builder/build-release.sh` builds
-  and publishes both, and the `MVPKG` client fetches the binary matching its
-  platform (falling back to source). See "Build + publish a release" above.
-- **Release deployment** — let `mv_package` deploy selected releases: choose
-  which monitored releases become registry packages (built via `builder/`
-  where native code is involved) and publish them.
+  Set `WEBAUTHN_RP_ID` + `WEBAUTHN_ORIGIN` in production; registration is
+  guarded by **Cloudflare Turnstile** when `TURNSTILE_SITEKEY` +
+  `TURNSTILE_SECRET` are set.
+- **Source providers** — **done.** A package is added from its source URL; the
+  provider reads the manifest, tracks releases (a signed webhook at
+  `/webhook/<id>`, or polling), and indexes external artifacts.  GitHub is full
+  (auto-installed webhook); GitLab and a generic manifest source are
+  poll/metadata. Dependency-free ([`lib/providers.js`](lib/providers.js),
+  [`lib/github.js`](lib/github.js)).
+- **Index, not host** — **done.** The registry stores no bytes; every download
+  links to the source's release asset.
+- **More providers** — add push tracking for GitLab (project hooks) and other
+  hosts behind the same provider interface.
 
 ## Layout
 
 ```
-server.js            the registry service + website
+server.js            the registry service + website (an index; hosts nothing)
+lib/providers.js     source providers (github / gitlab / manifest)
+lib/github.js        GitHub API helpers (manifest, releases, webhooks)
+lib/webauthn.js      passkey (WebAuthn) verification
 Dockerfile           runnable registry image
-docker-compose.yml   deploy (persistent registry/ volume, publish token)
-mkrelease.sh         build a release tar from an account
-publish.sh           push a release to a running registry
-registry/            published packages (runtime data; not committed)
-builder/             the UniData builder image (build/validate releases)
+docker-compose.yml   deploy (persistent data volume + .env)
+registry/            the index (runtime data; not committed)
+builder/             the UniData builder image (compile native bridges in CI)
 test/run.sh          end-to-end install-loop test (client + registry)
 ```
 
