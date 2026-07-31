@@ -14,6 +14,7 @@ services:
     environment:
       - MVPKG_PUBLISH_TOKEN=${MVPKG_PUBLISH_TOKEN:?set MVPKG_PUBLISH_TOKEN in .env}
       - MVPKG_ADMIN_USERS=${MVPKG_ADMIN_USERS:-}   # comma-separated admin usernames
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}             # admin:repo_hook — auto-installs release webhooks + reads mvpkg.json
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-}         # e.g. mv-package.heydon.io
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-}       # e.g. https://mv-package.heydon.io
       - TURNSTILE_SITEKEY=${TURNSTILE_SITEKEY:-}   # Cloudflare Turnstile (CAPTCHA), public
