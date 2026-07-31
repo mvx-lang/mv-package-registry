@@ -397,6 +397,65 @@ function accountPage(user, opts) {
 }
 
 // ---- publish ---------------------------------------------------------
+// Upsert one artifact into a package's meta.json: create or merge the version,
+// dedupe by artifact key, keep `source` as the default tarball, and track the
+// systems.  Owner is preserved across re-publishes.  Shared by publish() (an
+// upload or reference) and the GitHub release indexer.  Writes meta.json only —
+// callers that host bytes write the tar themselves.
+function upsertArtifact(opts) {
+  const existing = loadPackage(opts.name);
+  const ownerName = (existing && existing.owner) || opts.owner || 'admin';
+  let meta = (existing && existing.version === opts.version) ? existing
+    : { name: opts.name, version: opts.version, owner: ownerName, description: '', dependencies: '', license: '', systems: [], artifacts: [], tarball: '', published: Date.now() };
+  meta.owner = ownerName;
+  if (opts.description) meta.description = opts.description;
+  if (opts.dependencies) meta.dependencies = opts.dependencies;
+  if (opts.license) meta.license = opts.license;
+  const art = opts.kind === 'binary'
+    ? { kind: 'binary', system: opts.system, os: opts.os, arch: opts.arch, endian: opts.endian, tarball: opts.tarball }
+    : { kind: 'source', tarball: opts.tarball };
+  if (opts.external) art.external = true;
+  meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.os === art.os && a.arch === art.arch && a.endian === art.endian));
+  meta.artifacts.push(art);
+  const src = meta.artifacts.find(a => a.kind === 'source');
+  meta.tarball = src ? src.tarball : opts.tarball;   // default (unselected) = source
+  const declared = Array.isArray(opts.systems) ? opts.systems
+    : (opts.systems ? String(opts.systems).split(/[,\s]+/).filter(Boolean) : []);
+  meta.systems = [...new Set([...(meta.systems || []), ...declared, ...meta.artifacts.filter(a => a.kind === 'binary').map(a => a.system)])];
+  fs.mkdirSync(path.join(REGDIR, opts.name), { recursive: true });
+  fs.writeFileSync(path.join(REGDIR, opts.name, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+  return meta;
+}
+
+// Index a GitHub release's assets as external artifacts on the connected
+// package — the registry links the asset URLs, GitHub keeps the bytes.  Asset
+// names follow the release convention `<base>-<version>-<suffix>.tar.gz`, where
+// base is the package name with '/'->'_' and suffix is "source" or
+// "<system>-<os>-<arch>-<endian>".  Returns how many assets were indexed.
+function indexRelease(conn, rel, ownerUsername) {
+  const pkg = conn && conn.package;
+  if (!pkg || !okName(pkg)) return 0;
+  const version = String(rel.tag || '').replace(/^v/, '');
+  if (!version) return 0;
+  const prefix = `${pkg.replace(/\//g, '_')}-${version}-`;
+  let n = 0;
+  for (const asset of (rel.assets || [])) {
+    const an = asset.name || '';
+    if (!asset.url || !an.endsWith('.tar.gz') || !an.startsWith(prefix)) continue;
+    const suffix = an.slice(prefix.length, -'.tar.gz'.length);
+    let spec;
+    if (suffix === 'source') spec = { kind: 'source' };
+    else {
+      const p = suffix.split('-');
+      if (p.length !== 4) continue;                    // not the <sys>-<os>-<arch>-<endian> shape
+      spec = { kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3] };
+    }
+    upsertArtifact({ name: pkg, version, owner: ownerUsername, tarball: asset.url, external: true, ...spec });
+    n++;
+  }
+  return n;
+}
+
 function publish(req, res, q) {
   const h = req.headers;
   const field = (hk, qk) => (h[hk] != null ? String(h[hk]) : String(q[qk] || ''));
@@ -442,32 +501,21 @@ function publish(req, res, q) {
     const tarName = `${base}-${version}-${suffix}.tar.gz`;
     const tarball = isExt ? extUrl : `/tarball/${name}/${tarName}`;
 
-    // Merge artifacts into the same version; a new version starts fresh.
-    let meta = (existing && existing.version === version) ? existing
-      : { name, version, owner: ownerName, description: '', dependencies: '', license: '', systems: [], artifacts: [], tarball: '', published: Date.now() };
-    meta.owner = ownerName;
-    const desc = field('x-pkg-description', 'description'); if (desc) meta.description = desc;
-    const deps = field('x-pkg-dependencies', 'dependencies'); if (deps) meta.dependencies = deps;
-    // SPDX licence (e.g. "GPL-2.0-only", "LicenseRef-Commercial").  Author-set
-    // via the manifest; the registry may fill it from a linked GitHub repo.
-    const lic = field('x-pkg-license', 'license'); if (lic) meta.license = lic;
-
-    const art = kind === 'binary'
-      ? { kind, system: aSystem, os: aOs, arch: aArch, endian: aEndian, tarball }
-      : { kind: 'source', tarball };
-    if (isExt) art.external = true;
-    meta.artifacts = (meta.artifacts || []).filter(a => !(a.kind === art.kind && a.system === art.system && a.os === art.os && a.arch === art.arch && a.endian === art.endian));
-    meta.artifacts.push(art);
-    const src = meta.artifacts.find(a => a.kind === 'source');
-    meta.tarball = src ? src.tarball : tarball;        // default (unselected) = source
-    const sysRaw = field('x-pkg-systems', 'systems');
-    const declared = sysRaw ? sysRaw.split(/[,\s]+/).filter(Boolean) : [];
-    meta.systems = [...new Set([...(meta.systems || []), ...declared, ...meta.artifacts.filter(a => a.kind === 'binary').map(a => a.system)])];
-
     try {
       fs.mkdirSync(dir, { recursive: true });
       if (!isExt) fs.writeFileSync(path.join(dir, tarName), buf);
-      fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+      // Merge artifacts into the same version; a new version starts fresh.
+      // (SPDX licence is author-set via the manifest; the registry may also
+      // fill it from a linked GitHub repo.)
+      upsertArtifact({
+        name, version, owner: ownerName,
+        description: field('x-pkg-description', 'description'),
+        dependencies: field('x-pkg-dependencies', 'dependencies'),
+        license: field('x-pkg-license', 'license'),
+        systems: field('x-pkg-systems', 'systems'),
+        kind, system: aSystem, os: aOs, arch: aArch, endian: aEndian,
+        tarball, external: isExt,
+      });
     } catch (e) { return sendJSON(res, 500, { error: 'write failed: ' + e.message }); }
     console.log(`published ${name} ${version} [${suffix}] by ${ownerName} (${isExt ? 'ref ' + extUrl : buf.length + ' bytes'})`);
     sendJSON(res, 200, { ok: true, name, version, owner: ownerName, artifact: suffix, external: isExt || undefined });
@@ -548,9 +596,11 @@ const server = http.createServer((req, res) => {
         if (event === 'release') {
           let p; try { p = JSON.parse(buf.toString()); } catch { p = null; }
           if (p && p.release && ['published', 'released', 'created'].includes(p.action)) {
-            found.conn.latest = github.releaseInfo(p.release); found.conn.latest.seenAt = Date.now();
+            const info = github.releaseInfo(p.release); info.seenAt = Date.now();
+            found.conn.latest = info;
+            const n = indexRelease(found.conn, info, found.user.username);
             saveUser(found.user);
-            console.log(`webhook: ${found.conn.repo} release ${found.conn.latest.tag}`);
+            console.log(`webhook: ${found.conn.repo} release ${info.tag} -> indexed ${n} artifact(s) in ${found.conn.package || '(no package set)'}`);
           }
         }
         return sendJSON(res, 200, { ok: true });
@@ -709,7 +759,7 @@ if (POLL_MS > 0) setInterval(() => {
         if (e || !rel) return;
         if (!conn.latest || conn.latest.tag !== rel.tag) {
           const u2 = loadUser(usr.username); const c2 = (u2.repos || []).find(x => x.id === conn.id);
-          if (c2) { rel.seenAt = Date.now(); c2.latest = rel; saveUser(u2); console.log(`poll: ${conn.repo} -> ${rel.tag}`); }
+          if (c2) { rel.seenAt = Date.now(); c2.latest = rel; const n = indexRelease(c2, rel, u2.username); saveUser(u2); console.log(`poll: ${conn.repo} -> ${rel.tag} (indexed ${n} artifact(s))`); }
         }
       });
     }
