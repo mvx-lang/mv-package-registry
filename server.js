@@ -500,12 +500,11 @@ function mergeVersion(pkg, v) {
   if (pkg.versions.length > 50) pkg.versions.length = 50;
 }
 
-// Index a release's assets onto a package: refresh version + artifacts (all
-// external), keep source/tracking/owner.  Returns how many assets were indexed.
-function indexRelease(pkg, rel) {
-  if (!rel || !rel.version) return 0;
-  const version = rel.version;
-  const prefix = `${pkg.name.replace(/\//g, '_')}-${version}-`;
+// Recognisable release assets -> external artifacts.  Assets follow
+// `<base>-<ver>-<suffix>.tar.gz` (base = name '/'->'_'); suffix "source" or a
+// 4-part "<system>-<os>-<arch>-<endian>" binary key.
+function artifactsFromRelease(pkg, rel) {
+  const prefix = `${pkg.name.replace(/\//g, '_')}-${rel.version}-`;
   const arts = [];
   for (const asset of (rel.assets || [])) {
     const an = asset.name || '';
@@ -517,7 +516,23 @@ function indexRelease(pkg, rel) {
       if (p.length === 4) arts.push({ kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3], tarball: asset.url, external: true });
     }
   }
+  return arts;
+}
+
+// Index a release's assets onto a package: refresh version + artifacts (all
+// external), keep source/tracking/owner.  Idempotent and change-aware — writes
+// only when the version or the asset set actually changed, so it is safe to
+// call on every poll (release assets can arrive AFTER the initial publish, e.g.
+// a binary built by a later CI job that the "published" webhook missed).
+// Returns the artifact count when it (re)indexed, else 0.
+function indexRelease(pkg, rel) {
+  if (!rel || !rel.version) return 0;
+  const version = rel.version;
+  const arts = artifactsFromRelease(pkg, rel);
   if (!arts.length) return 0;                          // nothing recognisable in this release
+  const key = a => a.map(x => x.tarball).sort().join('|');
+  const unchanged = pkg.version === version && key(pkg.artifacts || []) === key(arts);
+  if (unchanged) return 0;                             // already indexed exactly this set
   pkg.version = version;
   pkg.artifacts = arts;
   const src = arts.find(a => a.kind === 'source');
@@ -861,8 +876,9 @@ if (POLL_MS > 0) setInterval(() => {
     if (!prov) continue;
     prov.latestRelease(pkg.tracking.ref, (e, rel) => {
       if (e || !rel || !rel.version) return;
-      const seen = pkg.tracking.latest && pkg.tracking.latest.version;
-      if (seen === rel.version) return;
+      // indexRelease is change-aware, so call it every poll: it picks up a new
+      // version AND late-arriving assets on the current one (a binary built by
+      // a later CI job the "published" webhook did not yet see).
       const fresh = loadPackage(pkg.name);
       if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`poll: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
     });
