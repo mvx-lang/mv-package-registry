@@ -866,5 +866,15 @@ if (POLL_MS > 0) setInterval(() => {
       const fresh = loadPackage(pkg.name);
       if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`poll: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
     });
+    // One-time backfill of the release history for packages indexed before the
+    // Versions sidebar existed (the poll above only tracks the latest release).
+    if (!pkg.versions && prov.listVersions) prov.listVersions(pkg.tracking.ref, (e, vers) => {
+      if (e || !vers || !vers.length) return;
+      const fresh = loadPackage(pkg.name);
+      if (!fresh) return;
+      vers.forEach(v => mergeVersion(fresh, v));
+      savePackage(fresh);
+      console.log(`poll: ${pkg.name} backfilled ${vers.length} version(s)`);
+    });
   }
 }, POLL_MS).unref();
