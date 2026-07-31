@@ -33,6 +33,10 @@ on:
         description: "Description (fallback — mvpkg.json wins)"
         required: false
         default: ""
+      license:
+        description: "SPDX licence id to publish, e.g. GPL-2.0-only"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       package_repo: { type: string, required: true }
@@ -41,6 +45,7 @@ on:
       version:      { type: string, required: true }
       deps:         { type: string, required: false, default: "" }
       description:  { type: string, required: false, default: "" }
+      license:      { type: string, required: false, default: "" }
     secrets:
       MVPKG_PUBLISH_TOKEN:
         description: "Registry publish token (empty for an open registry)."
@@ -83,6 +88,7 @@ jobs:
           registry-url: ${{ vars.MVPKG_REGISTRY || 'https://mv-package.heydon.io' }}
           deps: ${{ inputs.deps }}
           description: ${{ inputs.description }}
+          license: ${{ inputs.license }}
           publish-token: ${{ secrets.MVPKG_PUBLISH_TOKEN }}
 
       - name: Upload the release tars as a workflow artifact

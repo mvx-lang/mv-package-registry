@@ -45,6 +45,13 @@ inputs:
     description: "Package description (fallback; the package's mvpkg.json wins)."
     required: false
     default: ""
+  license:
+    description: >
+      SPDX licence id to publish (e.g. GPL-2.0-only).  Passed as MVPKG_LICENSE;
+      a package's mvpkg.json licence still wins when the builder image can read
+      it.  Leave empty to publish no licence.
+    required: false
+    default: ""
   system:
     description: "MV system id for the artifact key."
     required: false
@@ -85,6 +92,7 @@ runs:
       shell: bash
       env:
         MVPKG_PUBLISH_TOKEN: ${{ inputs.publish-token }}
+        MVPKG_LICENSE: ${{ inputs.license }}
       run: |
         set -euo pipefail
         PKG="$(realpath "${{ inputs.package-path }}")"
@@ -101,6 +109,7 @@ runs:
         docker run --rm --hostname unidata --shm-size="${{ inputs.shm-size }}" \
           -e MVPKG_REGISTRY="${{ inputs.registry-url }}" \
           -e MVPKG_PUBLISH_TOKEN="$MVPKG_PUBLISH_TOKEN" \
+          -e MVPKG_LICENSE="$MVPKG_LICENSE" \
           -e MVPKG_SYSTEM="${{ inputs.system }}" \
           -v "$PKG":/pkg \
           -v "$REG":/registry:ro \

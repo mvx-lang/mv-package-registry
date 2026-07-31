@@ -44,26 +44,41 @@ Actions → **udt release** → **Run workflow**, then supply:
 
 ## Reuse it from a package repo
 
-A package repo can release itself on a tag by calling the reusable workflow —
-no build logic in the package repo, and it runs on the same self-hosted runner:
+A package repo releases itself on a version tag by calling the reusable
+workflow — no build logic in the package repo, and it runs on the same
+self-hosted runner. This is exactly [`udt_curses`'s
+`release.yml`](https://github.com/mvx-lang/udt_curses/blob/main/.github/workflows/release.yml):
 
 ```yaml
 # .github/workflows/release.yml in e.g. mvx-lang/udt_curses
 name: release
 on:
   push:
-    tags: ["v*"]
+    tags: ["[0-9]+.[0-9]+*"]     # tag the bare version: git tag 1.0 && git push origin 1.0
 jobs:
-  udt:
+  release:
     uses: mvx-lang/mv-package-registry/.github/workflows/udt-release.yml@main
     with:
       package_repo: ${{ github.repository }}
       package_ref: ${{ github.ref_name }}
       name: mv-lang/curses
-      version: ${{ github.ref_name }}   # e.g. the tag, sans a leading v if you prefer
+      version: ${{ github.ref_name }}
+      description: "ncurses terminal handling for UniData (KEYIN by name, mouse)"
+      license: GPL-2.0-only
     secrets:
       MVPKG_PUBLISH_TOKEN: ${{ secrets.MVPKG_PUBLISH_TOKEN }}
 ```
+
+For this cross-repo reuse to work in the org:
+
+- **Register the runner at the org level** (or share it with the package
+  repos), not only on this repo — otherwise a package repo's job can't land on
+  the `udt` runner.
+- **Allow this repo's workflows to be called** by the package repos: this
+  repo → Settings → Actions → General → *Access* → allow accessible
+  repositories in the organization.
+- The package repo sets its own `MVPKG_PUBLISH_TOKEN` secret (or inherit it
+  from an org secret).
 
 ## What a run produces
 
