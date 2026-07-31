@@ -372,7 +372,10 @@ function pkgPage(name, user) {
   const deps = String(p.dependencies || '').trim();
   const depsHtml = deps ? deps.split(/\s+/).map(d => `<a href="/p/${esc(d)}">${esc(d)}</a>`).join(', ') : '<span class="meta">none</span>';
   const sys = (p.systems && p.systems.length) ? p.systems.map(s => `<span class="badge">${esc(s)}</span>`).join('') : '<span class="meta">any</span>';
-  const binaryOnly = p.artifacts && p.artifacts.length && !p.artifacts.some(a => a.kind === 'source');
+  const hasSource = p.artifacts && p.artifacts.some(a => a.kind === 'source');
+  const hasBinary = p.artifacts && p.artifacts.some(a => a.kind === 'binary');
+  const binaryOnly = p.artifacts && p.artifacts.length && !hasSource;
+  const distribution = binaryOnly ? 'binary only' : (hasBinary ? 'source + binary' : 'source');
   const isDev = p.artifacts && p.artifacts.some(a => a.dev);
   const downloads = (p.artifacts && p.artifacts.length)
     ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>`).join('')
@@ -415,7 +418,7 @@ function pkgPage(name, user) {
         row('Version', esc(p.version || '—')) +
         row('Licence', p.license ? esc(p.license) : '<span class="meta">unspecified</span>') +
         row('Systems', sys) +
-        row('Distribution', binaryOnly ? 'binary only' : 'source') +
+        row('Distribution', distribution) +
         (p.owner ? row('Maintainer', esc(p.owner)) : '')
       }</div>
       <div class="box"><h4>Dependencies</h4>${depsHtml}</div>
