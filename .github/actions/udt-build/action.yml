@@ -1,0 +1,110 @@
+# UniData package build — a private composite action.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# Build and publish one MultiValue package release by running the licensed
+# udt-builder container (builder/build-release.sh inside it): a portable
+# `source` tar plus a per-arch UniData `binary` tar, both pushed to the
+# registry against the same version.
+#
+# Runs Docker on the host, so it needs a runner that HAS Docker and the
+# udt-builder image already built — a self-hosted RedHat/Rocky runner (the
+# image carries licensed Rocket UniData binaries and must stay on your own
+# infrastructure; it is never built here).  See builder/README.md to build it.
+name: "UniData package build"
+description: "Build + publish a MultiValue package release (source + per-arch UniData binary) via the udt-builder container."
+
+inputs:
+  name:
+    description: "Package name to publish (may be scoped, e.g. mv-lang/curses)."
+    required: true
+  version:
+    description: "Release version to cut (e.g. 1.0)."
+    required: true
+  package-path:
+    description: "Path to the package source to build (a checkout of the package repo)."
+    required: true
+  registry-url:
+    description: "Registry base URL to publish to (e.g. https://mv-package.heydon.io)."
+    required: true
+  registry-path:
+    description: >
+      Path to the mv-package-registry checkout that supplies build-release.sh +
+      publish.sh.  Defaults to this action's own repo, so a caller in another
+      repo does not have to check the registry out separately.
+    required: false
+    default: "${{ github.action_path }}/../../.."
+  out-path:
+    description: "Host directory to write the release tars into."
+    required: false
+    default: "${{ github.workspace }}/releases"
+  deps:
+    description: "Space-separated dependency names (fallback; the package's mvpkg.json wins)."
+    required: false
+    default: ""
+  description:
+    description: "Package description (fallback; the package's mvpkg.json wins)."
+    required: false
+    default: ""
+  system:
+    description: "MV system id for the artifact key."
+    required: false
+    default: "udt"
+  image:
+    description: "udt-builder Docker image tag present on the runner."
+    required: false
+    default: "udt-builder:8.3.2"
+  shm-size:
+    description: "Shared-memory size for UniData's SysV SMM."
+    required: false
+    default: "512m"
+  publish-token:
+    description: "Registry publish token (X-Auth-Token); empty for an open registry."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check Docker and the udt-builder image
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "::error::docker not found on this runner. The udt build runs a container;" \
+               "use a self-hosted RedHat/Rocky runner with Docker installed." >&2
+          exit 1
+        fi
+        if ! docker image inspect "${{ inputs.image }}" >/dev/null 2>&1; then
+          echo "::error::udt-builder image '${{ inputs.image }}' is not present on this runner." \
+               "Build it once from your licensed install (builder/README.md):" \
+               "capture-install.sh <host> then docker build -t ${{ inputs.image }} builder/." >&2
+          exit 1
+        fi
+
+    - name: Build + publish the release
+      shell: bash
+      env:
+        MVPKG_PUBLISH_TOKEN: ${{ inputs.publish-token }}
+      run: |
+        set -euo pipefail
+        PKG="$(realpath "${{ inputs.package-path }}")"
+        REG="$(realpath "${{ inputs.registry-path }}")"
+        OUT="${{ inputs.out-path }}"
+        mkdir -p "$OUT"; OUT="$(realpath "$OUT")"
+        [ -f "$REG/builder/build-release.sh" ] || {
+          echo "::error::build-release.sh not found under registry-path '$REG'." >&2; exit 1; }
+        echo "package : $PKG"
+        echo "registry: $REG"
+        echo "out     : $OUT"
+        # The container's entrypoint starts UniData (SMM) then runs the build,
+        # which produces the source + per-arch binary tars and publishes both.
+        docker run --rm --hostname unidata --shm-size="${{ inputs.shm-size }}" \
+          -e MVPKG_REGISTRY="${{ inputs.registry-url }}" \
+          -e MVPKG_PUBLISH_TOKEN="$MVPKG_PUBLISH_TOKEN" \
+          -e MVPKG_SYSTEM="${{ inputs.system }}" \
+          -v "$PKG":/pkg \
+          -v "$REG":/registry:ro \
+          -v "$OUT":/out \
+          "${{ inputs.image }}" \
+          bash /registry/builder/build-release.sh \
+            "${{ inputs.name }}" "${{ inputs.version }}" "${{ inputs.deps }}" "${{ inputs.description }}"
