@@ -266,9 +266,23 @@ pre{background:var(--code);border:1px solid var(--line);border-radius:8px;paddin
 .msg{border-radius:8px;padding:10px 12px;margin:0 0 16px}.msg.err{border:1px solid var(--err);color:#ffb0aa}.msg.ok{border:1px solid var(--ok);color:#9ff0b0}
 .tok{font-family:ui-monospace,monospace;background:var(--code);border:1px solid var(--ok);border-radius:8px;padding:12px;word-break:break-all}
 footer{color:var(--mut);font-size:12px;border-top:1px solid var(--line);margin-top:34px;padding:18px 0}
-.empty{color:var(--mut);padding:30px 0;text-align:center}`;
+.empty{color:var(--mut);padding:30px 0;text-align:center}
+.wrap.wide{max-width:1040px}
+.pkg{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:34px;align-items:start}
+@media(max-width:760px){.pkg{grid-template-columns:1fr}}
+.pkg-main h2{font-size:25px;margin:0 0 4px;word-break:break-word}.pkg-main h2 .v{font-size:15px}
+.pkg-main .lead{color:var(--fg);font-size:17px;line-height:1.5;margin:6px 0 22px}
+.pkg-main h3{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:24px 0 8px}
+.pkg-side .box{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:12px 15px;margin:0 0 14px}
+.pkg-side .box>pre{margin:0}
+.pkg-side h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+.pkg-side .row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}
+.pkg-side .row:first-child{border-top:0}
+.pkg-side .row .k{color:var(--mut);white-space:nowrap}.pkg-side .row .val{text-align:right;word-break:break-word}
+.pkg-side .dl{display:block;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}.pkg-side .dl:first-child{border-top:0}
+.pkg-side .box a{word-break:break-all}`;
 
-function page(title, inner, user) {
+function page(title, inner, user, wide) {
   const nav = user
     ? `<a href="/account">${esc(user.username)}</a> <form method="post" action="/logout" style="margin:0;display:inline"><button style="padding:2px 10px">Sign out</button></form>`
     : `<a href="/login">Sign in</a> <a href="/register">Register</a>`;
@@ -276,7 +290,7 @@ function page(title, inner, user) {
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${CSS}</style></head><body>
 <header><div class="wrap"><h1><a href="/">mv_package</a></h1><span class="tag">a package registry for MultiValue</span>
 <span class="nav">${nav}</span></div></header>
-<main class="wrap">${inner}</main>
+<main class="wrap${wide ? ' wide' : ''}">${inner}</main>
 <footer class="wrap">mv_package &middot; Composer/npm for the PICK world &middot; <code>MVPKG install &lt;name&gt;</code></footer>
 <script src="/wa.js" defer></script></body></html>`;
 }
@@ -308,25 +322,40 @@ function artLabel(a) {
 function pkgPage(name, user) {
   const p = loadPackage(name);
   if (!p) return null;
+  const row = (k, v) => `<div class="row"><span class="k">${k}</span><span class="val">${v}</span></div>`;
   const deps = String(p.dependencies || '').trim();
   const depsHtml = deps ? deps.split(/\s+/).map(d => `<a href="/p/${esc(d)}">${esc(d)}</a>`).join(', ') : '<span class="meta">none</span>';
-  const sys = (p.systems && p.systems.length) ? p.systems.map(esc).join(', ') : 'any';
-  const tar = (p.artifacts && p.artifacts.length)
-    ? '<p class="meta"><b>Artifacts:</b></p>' + p.artifacts.map(a =>
-        `<p class="meta">&bull; <a href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : 'source')}</a>${a.external ? ' <span class="meta">— external</span>' : ''}</p>`).join('')
-    : (p.tarball ? `<p class="meta"><b>Download:</b> <a href="${esc(p.tarball)}">${esc(path.basename(p.tarball))}</a></p>` : '');
-  const owner = p.owner ? `<p class="meta"><b>Owner:</b> ${esc(p.owner)}</p>` : '';
-  const src = p.source ? `<p class="meta"><b>Source:</b> <a href="${esc(p.source)}">${esc(p.source)}</a></p>` : '';
-  const license = `<p class="meta"><b>Licence:</b> ${p.license ? esc(p.license) : '<span class="meta">unspecified</span>'}</p>`;
-  // A version whose artifacts include no "source" is binary-only (commercial).
+  const sys = (p.systems && p.systems.length) ? p.systems.map(s => `<span class="badge">${esc(s)}</span>`).join('') : '<span class="meta">any</span>';
   const binaryOnly = p.artifacts && p.artifacts.length && !p.artifacts.some(a => a.kind === 'source');
-  const dist = `<p class="meta"><b>Distribution:</b> ${binaryOnly ? 'binary only — no source' : 'source included'}</p>`;
-  return page(`${p.name} — mv_package`,
-    `<div class="card"><h3>${esc(p.name)} <span class="v">${esc(p.version || '')}</span></h3><p>${esc(p.description || '')}</p></div>
-     <h3>Install</h3><pre>MVPKG install ${esc(p.name)}</pre>
-     <p class="meta"><b>Dependencies:</b> ${depsHtml}</p><p class="meta"><b>Systems:</b> ${esc(sys)}</p>${license}${dist}${src}${owner}${tar}
-     <p class="meta" style="margin-top:14px">This is an index — packages are hosted at their source; downloads link out.</p>
-     <p style="margin-top:22px"><a href="/">&larr; all packages</a></p>`, user);
+  const isDev = p.artifacts && p.artifacts.some(a => a.dev);
+  const downloads = (p.artifacts && p.artifacts.length)
+    ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>`).join('')
+    : '<span class="meta">none yet</span>';
+
+  const main = `<div class="pkg-main">
+      <h2>${esc(p.name)} <span class="v badge">${esc(p.version || '—')}</span></h2>
+      <p class="lead">${esc(p.description || 'No description.')}</p>
+      <h3>Install</h3>
+      <pre>MVPKG install ${esc(p.name)}</pre>
+      <h3>About</h3>
+      <p class="meta">This is an <b>index</b> — the registry tracks this package's source and releases but hosts nothing; every download links to the source.${isDev ? ' No tagged release yet, so it tracks the default branch (a <b>dev</b> version).' : ''}</p>
+      <p style="margin-top:26px"><a href="/">&larr; all packages</a></p>
+    </div>`;
+
+  const side = `<aside class="pkg-side">
+      <div class="box">${
+        row('Version', esc(p.version || '—')) +
+        row('Licence', p.license ? esc(p.license) : '<span class="meta">unspecified</span>') +
+        row('Systems', sys) +
+        row('Distribution', binaryOnly ? 'binary only' : 'source') +
+        (p.owner ? row('Maintainer', esc(p.owner)) : '')
+      }</div>
+      <div class="box"><h4>Dependencies</h4>${depsHtml}</div>
+      ${p.source ? `<div class="box"><h4>Source</h4><a href="${esc(p.source)}">${esc(p.source.replace(/^https?:\/\//, ''))}</a></div>` : ''}
+      <div class="box"><h4>Downloads</h4>${downloads}</div>
+    </aside>`;
+
+  return page(`${p.name} — mv_package`, `<div class="pkg">${main}${side}</div>`, user, true);
 }
 
 function authForm(kind, msg, values) {
@@ -420,6 +449,18 @@ function indexRelease(pkg, rel) {
   return arts.length;
 }
 
+// Index a "dev" version — the source of the default branch — for a package
+// with no release yet.  A single external source artifact (the branch archive).
+function indexDev(pkg, dev) {
+  pkg.version = dev.version;
+  pkg.artifacts = [{ kind: 'source', tarball: dev.tarball, external: true, dev: true }];
+  pkg.tarball = dev.tarball;
+  pkg.updated = Date.now();
+  if (pkg.tracking) pkg.tracking.latest = { version: dev.version, tag: dev.branch, seenAt: Date.now() };
+  savePackage(pkg);
+  return 1;
+}
+
 // Add or refresh a package from a pasted source URL: resolve the provider, read
 // mvpkg.json for the name + metadata, record the source, install push tracking
 // where supported (a webhook), and index the current release.
@@ -457,8 +498,20 @@ function addPackage(user, source, pkgOverride, cb) {
     meta.updated = Date.now();
     savePackage(meta);
 
+    // Index the current release; if there is no tagged release with matching
+    // assets, fall back to the source of the default branch (a "dev" version),
+    // so a package can be added before it cuts a release.
     const indexLatest = (installed, note) => provider.latestRelease(ref, (e2, rel) => {
-      if (!e2 && rel) { const fresh = loadPackage(name); if (fresh) indexRelease(fresh, rel); }
+      const fresh = loadPackage(name);
+      if (fresh && !e2 && rel && rel.assets && rel.assets.length && indexRelease(fresh, rel) > 0)
+        return cb(null, { name, installed, note });
+      if (fresh && provider.devVersion) {
+        return provider.devVersion(ref, (e3, dev) => {
+          const f2 = loadPackage(name);
+          if (f2 && !e3 && dev) indexDev(f2, dev);
+          cb(null, { name, installed, note: note || (dev ? 'no release yet — tracking the ' + dev.version + ' branch' : note) });
+        });
+      }
       cb(null, { name, installed, note });
     });
 
