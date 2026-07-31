@@ -369,14 +369,15 @@ function accountPage(user, opts) {
         <div style="display:flex;justify-content:space-between;align-items:flex-start"><div>
           <b>${esc(r.repo)}</b>${r.package ? ' &rarr; <code>' + esc(r.package) + '</code>' : ''}<br>
           <span class="meta">latest release: ${r.latest ? esc(r.latest.tag) + ' &middot; ' + new Date(r.latest.at).toISOString().slice(0, 10) + (r.latest.html ? ' &middot; <a href="' + esc(r.latest.html) + '">view</a>' : '') : 'none detected yet'}</span><br>
-          <span class="meta">webhook: <code>${esc(BASE_URL)}/webhook/github/${esc(r.id)}</code></span></div>
+          <span class="meta">webhook: ${r.hookId ? '<span style="color:var(--acc)">installed on GitHub &#10003;</span>' : (r.repo ? '<code>' + esc(BASE_URL) + '/webhook/github/' + esc(r.id) + '</code> (add manually)' : 'n/a — not a GitHub repo')}</span></div>
           <form method="post" action="/account/repos/remove" style="margin:0"><input type="hidden" name="id" value="${esc(r.id)}"><button style="padding:4px 12px">Disconnect</button></form></div></div>`).join('')
     : '<p class="meta">No repositories connected.</p>';
-  const hookMsg = opts.freshHook
-    ? `<div class="msg ok">Connected <b>${esc(opts.freshHook.repo)}</b>. For instant notifications add a webhook in GitHub → Settings → Webhooks:</div>
-       <p class="meta">Payload URL <code>${esc(BASE_URL)}/webhook/github/${esc(opts.freshHook.id)}</code> &middot; Content type <code>application/json</code> &middot; event: Releases. Secret (copy now):</p>
-       <div class="tok">${esc(opts.freshHook.secret)}</div>`
-    : '';
+  const fh = opts.freshHook;
+  const hookMsg = !fh ? ''
+    : opts.hookInstalled
+      ? `<div class="msg ok">Connected <b>${esc(fh.repo || fh.source || '')}</b>${fh.package ? ' &rarr; <code>' + esc(fh.package) + '</code>' : ''} — the release webhook was installed on GitHub automatically. New releases appear here as they publish.</div>`
+      : `<div class="msg ok">Connected <b>${esc(fh.repo || fh.source || '')}</b>${fh.package ? ' &rarr; <code>' + esc(fh.package) + '</code>' : ''}.${opts.hookNote ? ' <span class="meta">' + esc(opts.hookNote) + '</span>' : ''}</div>` +
+        (fh.repo ? `<p class="meta">Couldn't auto-install the webhook — add it in GitHub → Settings → Webhooks: Payload URL <code>${esc(BASE_URL)}/webhook/github/${esc(fh.id)}</code> &middot; Content type <code>application/json</code> &middot; event: Releases. Secret (copy now):</p><div class="tok">${esc(fh.secret)}</div>` : '');
   const repoErr = opts.repoError ? `<div class="msg err">${esc(opts.repoError)}</div>` : '';
   return page('Account — mv_package',
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
@@ -384,10 +385,13 @@ function accountPage(user, opts) {
      <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
      <h3 style="margin-top:24px">GitHub repositories</h3>${hookMsg}${repoErr}${repos}
      <form method="post" action="/account/repos" style="margin-top:14px">
-       <label>Repository (owner/name)</label><input type="text" name="repo" placeholder="mvx-lang/udt_curses">
-       <label>Target package name (optional)</label><input type="text" name="package" placeholder="mv-lang/curses">
-       <div style="margin-top:10px"><button class="primary" type="submit">Connect repository</button></div>
+       <label>Paste a GitHub repo URL, <code>owner/repo</code>, or a link to an <code>mvpkg.json</code></label>
+       <input type="text" name="source" placeholder="https://github.com/mvx-lang/mv_git   —   or   mvx-lang/udt_curses">
+       <label>Package name <span class="meta">(optional — read from mvpkg.json when present)</span></label>
+       <input type="text" name="package" placeholder="mv-lang/curses">
+       <div style="margin-top:10px"><button class="primary" type="submit">Connect</button></div>
      </form>
+     <p class="meta">A GitHub repo gets its release webhook installed automatically; new releases are indexed here as they publish.</p>
      <h3 style="margin-top:24px">Your packages</h3>${pkgs}
      <h3 style="margin-top:24px">Publish tokens</h3>${fresh}${toks}
      <form method="post" action="/account/tokens" style="margin-top:14px">
@@ -450,7 +454,9 @@ function indexRelease(conn, rel, ownerUsername) {
       if (p.length !== 4) continue;                    // not the <sys>-<os>-<arch>-<endian> shape
       spec = { kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3] };
     }
-    upsertArtifact({ name: pkg, version, owner: ownerUsername, tarball: asset.url, external: true, ...spec });
+    const man = conn.manifest || {};
+    upsertArtifact({ name: pkg, version, owner: ownerUsername, tarball: asset.url, external: true, ...spec,
+      description: man.description, license: man.license, dependencies: man.dependencies, systems: man.systems });
     n++;
   }
   return n;
@@ -640,17 +646,63 @@ const server = http.createServer((req, res) => {
       }
       if (u.pathname === '/account/repos') {
         if (!user) return redirect(res, '/login');
-        const repo = String(form.repo || '').trim();
-        if (!github.okRepo(repo)) return sendHTML(res, 400, accountPage(user, { repoError: 'Use owner/repo, e.g. mvx-lang/udt_curses.' }));
-        user.repos = user.repos || [];
-        const conn = { id: crypto.randomBytes(6).toString('hex'), repo, package: String(form.package || '').trim(),
-          secret: crypto.randomBytes(24).toString('base64url'), latest: null, added: Date.now() };
-        user.repos.push(conn); saveUser(user);
-        github.latestRelease(repo, (e, rel) => { if (!e && rel) { const u2 = loadUser(user.username); const c2 = (u2.repos || []).find(x => x.id === conn.id); if (c2) { c2.latest = rel; saveUser(u2); } } });
-        return sendHTML(res, 200, accountPage(loadUser(user.username), { freshHook: conn }));
+        // Accept a pasted URL: a GitHub repo URL, bare owner/repo, a blob/raw
+        // URL, or a link to an mvpkg.json.  Derive the repo + read the manifest.
+        const input = String(form.source || form.repo || '').trim();
+        const parsed = github.parseConnect(input);
+        if (!parsed.repo && !parsed.mvpkgUrl)
+          return sendHTML(res, 400, accountPage(user, { repoError: 'Paste a GitHub repo URL, owner/repo, or a link to an mvpkg.json.' }));
+
+        const gotManifest = (manifestText) => {
+          let pkgName = String(form.package || '').trim();
+          let manifest = null;
+          if (manifestText) { try {
+            const j = JSON.parse(manifestText);
+            if (!pkgName && j.name) pkgName = String(j.name);
+            manifest = {
+              description: j.description || '', license: j.license || '',
+              dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
+              systems: Array.isArray(j.systems) ? j.systems : [],
+            };
+          } catch {} }
+          if (pkgName && !okName(pkgName)) pkgName = '';
+          if (!pkgName)
+            return sendHTML(res, 400, accountPage(user, { repoError: 'Could not determine the package name — add an mvpkg.json with a "name", or fill in the package field.' }));
+
+          user.repos = user.repos || [];
+          const conn = { id: crypto.randomBytes(6).toString('hex'), repo: parsed.repo || '', source: input,
+            package: pkgName, manifest, secret: crypto.randomBytes(24).toString('base64url'),
+            latest: null, hookId: null, added: Date.now() };
+          user.repos.push(conn); saveUser(user);
+
+          const finish = (installed, note) => {
+            // index the current release right away (also caught by webhook/poll)
+            if (parsed.repo) github.latestRelease(parsed.repo, (e, rel) => {
+              if (e || !rel) return;
+              const u3 = loadUser(user.username); const c3 = (u3.repos || []).find(x => x.id === conn.id);
+              if (c3) { rel.seenAt = Date.now(); c3.latest = rel; indexRelease(c3, rel, u3.username); saveUser(u3); }
+            });
+            return sendHTML(res, 200, accountPage(loadUser(user.username), { freshHook: conn, hookInstalled: installed, hookNote: note }));
+          };
+
+          if (parsed.repo) {
+            github.createWebhook(parsed.repo, `${BASE_URL}/webhook/github/${conn.id}`, conn.secret, (herr, hook) => {
+              if (hook) { const u2 = loadUser(user.username); const c2 = (u2.repos || []).find(x => x.id === conn.id); if (c2) { c2.hookId = hook.id || null; saveUser(u2); } }
+              finish(!herr && !!hook, herr ? herr.message : null);
+            });
+          } else {
+            finish(false, 'Registered from the manifest (not a GitHub repo, so releases are not auto-tracked).');
+          }
+        };
+
+        if (parsed.repo) github.repoFile(parsed.repo, (parsed.file && /mvpkg\.json$/i.test(parsed.file)) ? parsed.file : 'mvpkg.json', (e, t) => gotManifest(t));
+        else github.fetchUrl(parsed.mvpkgUrl, (e, t) => gotManifest(t));
+        return;                                          // response sent asynchronously above
       }
       if (u.pathname === '/account/repos/remove') {
         if (!user) return redirect(res, '/login');
+        const conn = (user.repos || []).find(r => r.id === form.id);
+        if (conn && conn.repo && conn.hookId) github.deleteWebhook(conn.repo, conn.hookId, () => {});
         user.repos = (user.repos || []).filter(r => r.id !== form.id);
         saveUser(user); return redirect(res, '/account');
       }
