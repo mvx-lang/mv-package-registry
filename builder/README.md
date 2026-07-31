@@ -22,8 +22,10 @@ needed), compiles BASIC, and runs the native build toolchain
    ./capture-install.sh rocky@your-unidata-host        # writes ud83.tar.gz
    ```
 
-   Pulls `$UDTHOME` (default `/usr/ud83`) plus any from-source
-   `/usr/local/lib64/libgit2` (needed by the git bridge).
+   Pulls `$UDTHOME` (default `/usr/ud83`) plus any from-source libgit2 —
+   the runtime `/usr/local/lib64/libgit2.so*` **and** its headers
+   (`/usr/local/include/git2*`), so the image can *build* `udt-git` (mv_git's
+   UniData binary) from source, not just run a prebuilt bridge.
 
 2. **Build**:
 
