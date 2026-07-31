@@ -272,6 +272,10 @@ footer{color:var(--mut);font-size:12px;border-top:1px solid var(--line);margin-t
 @media(max-width:760px){.pkg{grid-template-columns:1fr}}
 .pkg-main h2{font-size:25px;margin:0 0 4px;word-break:break-word}.pkg-main h2 .v{font-size:15px}
 .pkg-main .lead{color:var(--fg);font-size:17px;line-height:1.5;margin:6px 0 22px}
+.pkg-main .lead .repo-link{font-size:14px;white-space:nowrap}
+.pkg-side .vers{display:flex;justify-content:space-between;gap:10px;padding:5px 0;font-size:13px;border-top:1px solid var(--line)}
+.pkg-side .vers:first-child{border-top:0}.pkg-side .vers.cur{font-weight:600}
+.pkg-side .vers .at{color:var(--mut);white-space:nowrap;font-size:12px}
 .pkg-main h3{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:24px 0 8px}
 .pkg-side .box{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:12px 15px;margin:0 0 14px}
 .pkg-side .box>pre{margin:0}
@@ -374,18 +378,37 @@ function pkgPage(name, user) {
     ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>`).join('')
     : '<span class="meta">none yet</span>';
 
+  // The git repository home: for a git-hosted package the provider maps its
+  // tracking ref back to the repo URL (github/gitlab).  Distinct from p.source,
+  // which is merely where it was indexed from (e.g. a raw mvpkg.json URL).
+  const trk = p.tracking || {};
+  const prov = providers.byName(trk.provider);
+  const repoUrl = (prov && trk.ref && (trk.provider === 'github' || trk.provider === 'gitlab'))
+    ? prov.sourceUrl(trk.ref) : null;
+  const repoHost = repoUrl ? repoUrl.replace(/^https?:\/\/(www\.)?/, '') : '';
+
   const about = p.readme
     ? `<div class="readme">${mdToHtml(p.readme)}</div>`
     : `<p>${esc(p.description || 'No description provided.')}</p>`;
   const main = `<div class="pkg-main">
       <h2>${esc(p.name)} <span class="v badge">${esc(p.version || '—')}</span></h2>
-      <p class="lead">${esc(p.description || '')}</p>
+      <p class="lead">${esc(p.description || '')}${repoUrl ? ` <a class="repo-link" href="${esc(repoUrl)}">repository &nearr;</a>` : ''}</p>
       <h3>Install</h3>
       <pre>MVPKG install ${esc(p.name)}</pre>
       <h3>About</h3>
       ${about}
       <p class="meta" style="margin-top:26px">Indexed from its source — the registry hosts nothing.${isDev ? ' No tagged release yet; tracking the default branch (a dev version).' : ''} &middot; <a href="/">all packages</a></p>
     </div>`;
+
+  const ymd = at => { try { return new Date(at).toISOString().slice(0, 10); } catch { return ''; } };
+  const vers = (p.versions && p.versions.length) ? p.versions : (p.version ? [{ version: p.version, at: p.updated }] : []);
+  const versHtml = vers.length
+    ? vers.map(v => {
+        const cur = v.version === p.version;
+        const label = v.html ? `<a href="${esc(v.html)}">${esc(v.version)}</a>` : esc(v.version);
+        return `<div class="vers${cur ? ' cur' : ''}"><span>${label}</span><span class="at">${v.at ? esc(ymd(v.at)) : ''}</span></div>`;
+      }).join('')
+    : '<span class="meta">none yet</span>';
 
   const side = `<aside class="pkg-side">
       <div class="box">${
@@ -396,7 +419,9 @@ function pkgPage(name, user) {
         (p.owner ? row('Maintainer', esc(p.owner)) : '')
       }</div>
       <div class="box"><h4>Dependencies</h4>${depsHtml}</div>
-      ${p.source ? `<div class="box"><h4>Source</h4><a href="${esc(p.source)}">${esc(p.source.replace(/^https?:\/\//, ''))}</a></div>` : ''}
+      ${repoUrl ? `<div class="box"><h4>Repository</h4><a href="${esc(repoUrl)}">${esc(repoHost)}</a></div>` : ''}
+      ${p.source && p.source !== repoUrl ? `<div class="box"><h4>Source</h4><a href="${esc(p.source)}">${esc(p.source.replace(/^https?:\/\//, ''))}</a></div>` : ''}
+      <div class="box"><h4>Versions</h4>${versHtml}</div>
       <div class="box"><h4>Downloads</h4>${downloads}</div>
     </aside>`;
 
@@ -465,6 +490,16 @@ function accountPage(user, opts) {
 // Release assets follow `<base>-<version>-<suffix>.tar.gz` (base = name with
 // '/'->'_', suffix "source" or "<system>-<os>-<arch>-<endian>").
 
+// Record a version in the package's release history (newest first, deduped by
+// version).  Keeps a bounded, source-of-truth list for the "Versions" sidebar.
+function mergeVersion(pkg, v) {
+  if (!v || !v.version) return;
+  pkg.versions = (pkg.versions || []).filter(x => x.version !== v.version);
+  pkg.versions.unshift({ version: v.version, tag: v.tag || null, at: v.at || null, html: v.html || null });
+  pkg.versions.sort((a, b) => (b.at ? Date.parse(b.at) || 0 : 0) - (a.at ? Date.parse(a.at) || 0 : 0));
+  if (pkg.versions.length > 50) pkg.versions.length = 50;
+}
+
 // Index a release's assets onto a package: refresh version + artifacts (all
 // external), keep source/tracking/owner.  Returns how many assets were indexed.
 function indexRelease(pkg, rel) {
@@ -490,6 +525,7 @@ function indexRelease(pkg, rel) {
   pkg.systems = [...new Set([...(pkg.systems || []), ...arts.filter(a => a.kind === 'binary').map(a => a.system)])];
   pkg.updated = Date.now();
   if (pkg.tracking) pkg.tracking.latest = { version, tag: rel.tag, at: rel.at, html: rel.html, seenAt: Date.now() };
+  mergeVersion(pkg, { version, tag: rel.tag, at: rel.at, html: rel.html });
   savePackage(pkg);
   return arts.length;
 }
@@ -553,6 +589,19 @@ function addPackage(user, source, pkgOverride, cb) {
       });
     };
 
+    // Backfill the full release history (newest first) for the Versions sidebar.
+    const withVersions = (next) => {
+      if (!provider.listVersions) return next();
+      provider.listVersions(ref, (er, vers) => {
+        if (!er && vers && vers.length) {
+          const fresh = loadPackage(name) || meta;
+          vers.forEach(v => mergeVersion(fresh, v));
+          savePackage(fresh);
+        }
+        next();
+      });
+    };
+
     // Index the current release; if there is no tagged release with matching
     // assets, fall back to the source of the default branch (a "dev" version),
     // so a package can be added before it cuts a release.
@@ -570,7 +619,7 @@ function addPackage(user, source, pkgOverride, cb) {
       cb(null, { name, installed, note });
     });
 
-    withReadme(() => {
+    withReadme(() => withVersions(() => {
       if (provider.supportsTracking) {
         provider.installTracking(ref, { hookUrl: `${BASE_URL}/webhook/${meta.tracking.id}`, secret: meta.tracking.secret }, (herr, hook) => {
           if (hook) { const fresh = loadPackage(name); if (fresh && fresh.tracking) { fresh.tracking.hookId = hook.id || null; savePackage(fresh); } }
@@ -579,7 +628,7 @@ function addPackage(user, source, pkgOverride, cb) {
       } else {
         indexLatest(false, 'Releases are picked up by polling (this source has no push webhook).');
       }
-    });
+    }));
   });
 }
 
