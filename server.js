@@ -244,7 +244,7 @@ function readBody(req, cb) {
 
 // ---- website ---------------------------------------------------------
 const CSS = `
-:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#9198a1;--acc:#58a6ff;--code:#0b0f14;--ok:#3fb950;--err:#f85149}
+:root{--bg:#f4f1e9;--card:#fffdf9;--line:#ddd5c4;--fg:#22303a;--mut:#6b7480;--acc:#0a558c;--code:#eef1f4;--ok:#1a7f37;--err:#b42318}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
 a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
 .wrap{max-width:820px;margin:0 auto;padding:0 20px}
@@ -255,15 +255,15 @@ h1{font-size:20px;margin:0}h1 a{color:var(--fg)}.tag{color:var(--mut);font-size:
 form{margin:0 0 22px}input,button{font:inherit}
 input[type=search],input[type=text],input[type=email],input[type=password]{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font-size:15px;margin:6px 0}
 label{display:block;color:var(--mut);font-size:13px;margin-top:10px}
-button{padding:9px 16px;border-radius:8px;border:1px solid var(--line);background:#21262d;color:var(--fg);cursor:pointer}
-button:hover{border-color:var(--acc)}button.primary{background:#238636;border-color:#238636}
+button{padding:9px 16px;border-radius:8px;border:1px solid var(--line);background:#efeadf;color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--acc)}button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
 .card{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:14px 16px;margin:10px 0}
 .card h3{margin:0 0 4px;font-size:16px}.card .v{color:var(--mut);font-weight:400;font-size:13px}.card p{margin:6px 0 0}
 .badge{display:inline-block;font-size:11px;color:var(--mut);border:1px solid var(--line);border-radius:20px;padding:1px 8px;margin-left:6px}
 code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto}
 .meta{color:var(--mut);font-size:13px;margin:2px 0}.meta b{color:var(--fg);font-weight:600}
-.msg{border-radius:8px;padding:10px 12px;margin:0 0 16px}.msg.err{border:1px solid var(--err);color:#ffb0aa}.msg.ok{border:1px solid var(--ok);color:#9ff0b0}
+.msg{border-radius:8px;padding:10px 12px;margin:0 0 16px}.msg.err{border:1px solid var(--err);background:#fdecea;color:#8a1c13}.msg.ok{border:1px solid var(--ok);background:#eaf6ec;color:#155724}
 .tok{font-family:ui-monospace,monospace;background:var(--code);border:1px solid var(--ok);border-radius:8px;padding:12px;word-break:break-all}
 footer{color:var(--mut);font-size:12px;border-top:1px solid var(--line);margin-top:34px;padding:18px 0}
 .empty{color:var(--mut);padding:30px 0;text-align:center}
@@ -280,7 +280,13 @@ footer{color:var(--mut);font-size:12px;border-top:1px solid var(--line);margin-t
 .pkg-side .row:first-child{border-top:0}
 .pkg-side .row .k{color:var(--mut);white-space:nowrap}.pkg-side .row .val{text-align:right;word-break:break-word}
 .pkg-side .dl{display:block;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}.pkg-side .dl:first-child{border-top:0}
-.pkg-side .box a{word-break:break-all}`;
+.pkg-side .box a{word-break:break-all}
+.readme{line-height:1.6}
+.readme h1,.readme h2,.readme h3,.readme h4,.readme h5{margin:22px 0 8px;line-height:1.3}
+.readme h1{font-size:22px}.readme h2{font-size:19px}.readme h3{font-size:16px}.readme h4,.readme h5{font-size:14px}
+.readme p{margin:10px 0}.readme ul,.readme ol{margin:10px 0;padding-left:22px}.readme li{margin:3px 0}
+.readme pre{margin:12px 0}.readme :not(pre)>code{background:var(--code);padding:1px 5px;border-radius:5px;font-size:.92em}
+.readme a{word-break:break-word}.readme table{border-collapse:collapse;margin:10px 0}.readme td,.readme th{border:1px solid var(--line);padding:4px 10px}`;
 
 function page(title, inner, user, wide) {
   const nav = user
@@ -319,6 +325,42 @@ function artLabel(a) {
   return `${where} (binary)`;
 }
 
+// Minimal, dependency-free Markdown -> HTML for rendering a package README.
+// Escapes first (the README is source text), then a small subset: fenced code,
+// ATX headings, un/ordered lists, inline code/bold/italic, and http(s) links.
+function mdToHtml(md) {
+  const e = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const inline = s => e(s)
+    .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" rel="nofollow">$1</a>');
+  const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
+  const out = []; let i = 0, inCode = false, code = [], list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  while (i < lines.length) {
+    const ln = lines[i];
+    if (/^```/.test(ln)) {
+      if (inCode) { out.push('<pre><code>' + e(code.join('\n')) + '</code></pre>'); code = []; inCode = false; }
+      else { closeList(); inCode = true; }
+      i++; continue;
+    }
+    if (inCode) { code.push(ln); i++; continue; }
+    let m;
+    if ((m = ln.match(/^(#{1,5})\s+(.*)/))) { closeList(); const l = Math.min(m[1].length + 1, 5); out.push(`<h${l}>${inline(m[2])}</h${l}>`); i++; continue; }
+    if ((m = ln.match(/^\s*[-*]\s+(.*)/))) { if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; } out.push(`<li>${inline(m[1])}</li>`); i++; continue; }
+    if ((m = ln.match(/^\s*\d+\.\s+(.*)/))) { if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; } out.push(`<li>${inline(m[1])}</li>`); i++; continue; }
+    if (/^\s*$/.test(ln)) { closeList(); i++; continue; }
+    closeList();
+    const para = [ln]; i++;
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,5}\s|```|\s*[-*]\s|\s*\d+\.\s)/.test(lines[i])) { para.push(lines[i]); i++; }
+    out.push('<p>' + inline(para.join('\n')) + '</p>');
+  }
+  if (inCode) out.push('<pre><code>' + e(code.join('\n')) + '</code></pre>');
+  closeList();
+  return out.join('\n');
+}
+
 function pkgPage(name, user) {
   const p = loadPackage(name);
   if (!p) return null;
@@ -332,14 +374,17 @@ function pkgPage(name, user) {
     ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>`).join('')
     : '<span class="meta">none yet</span>';
 
+  const about = p.readme
+    ? `<div class="readme">${mdToHtml(p.readme)}</div>`
+    : `<p>${esc(p.description || 'No description provided.')}</p>`;
   const main = `<div class="pkg-main">
       <h2>${esc(p.name)} <span class="v badge">${esc(p.version || '—')}</span></h2>
-      <p class="lead">${esc(p.description || 'No description.')}</p>
+      <p class="lead">${esc(p.description || '')}</p>
       <h3>Install</h3>
       <pre>MVPKG install ${esc(p.name)}</pre>
       <h3>About</h3>
-      <p class="meta">This is an <b>index</b> — the registry tracks this package's source and releases but hosts nothing; every download links to the source.${isDev ? ' No tagged release yet, so it tracks the default branch (a <b>dev</b> version).' : ''}</p>
-      <p style="margin-top:26px"><a href="/">&larr; all packages</a></p>
+      ${about}
+      <p class="meta" style="margin-top:26px">Indexed from its source — the registry hosts nothing.${isDev ? ' No tagged release yet; tracking the default branch (a dev version).' : ''} &middot; <a href="/">all packages</a></p>
     </div>`;
 
   const side = `<aside class="pkg-side">
@@ -498,6 +543,16 @@ function addPackage(user, source, pkgOverride, cb) {
     meta.updated = Date.now();
     savePackage(meta);
 
+    // Best-effort README for the package page's About section (before indexing,
+    // so the fresh loads below include it — no lost-update race).
+    const withReadme = (next) => {
+      if (!provider.fetchFile) return next();
+      provider.fetchFile(ref, 'README.md', (er, readme) => {
+        if (readme) { meta.readme = readme; savePackage(meta); }
+        next();
+      });
+    };
+
     // Index the current release; if there is no tagged release with matching
     // assets, fall back to the source of the default branch (a "dev" version),
     // so a package can be added before it cuts a release.
@@ -515,14 +570,16 @@ function addPackage(user, source, pkgOverride, cb) {
       cb(null, { name, installed, note });
     });
 
-    if (provider.supportsTracking) {
-      provider.installTracking(ref, { hookUrl: `${BASE_URL}/webhook/${meta.tracking.id}`, secret: meta.tracking.secret }, (herr, hook) => {
-        if (hook) { const fresh = loadPackage(name); if (fresh && fresh.tracking) { fresh.tracking.hookId = hook.id || null; savePackage(fresh); } }
-        indexLatest(!herr && !!hook, herr ? herr.message : null);
-      });
-    } else {
-      indexLatest(false, 'Releases are picked up by polling (this source has no push webhook).');
-    }
+    withReadme(() => {
+      if (provider.supportsTracking) {
+        provider.installTracking(ref, { hookUrl: `${BASE_URL}/webhook/${meta.tracking.id}`, secret: meta.tracking.secret }, (herr, hook) => {
+          if (hook) { const fresh = loadPackage(name); if (fresh && fresh.tracking) { fresh.tracking.hookId = hook.id || null; savePackage(fresh); } }
+          indexLatest(!herr && !!hook, herr ? herr.message : null);
+        });
+      } else {
+        indexLatest(false, 'Releases are picked up by polling (this source has no push webhook).');
+      }
+    });
   });
 }
 
