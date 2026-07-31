@@ -74,14 +74,35 @@ docker run --rm -it --hostname unidata --shm-size=512m udt-builder:8.3.2 bash
 #       udt
 ```
 
+## Run it as a UniData server (UniObjects — for demos)
+
+The image is built for *compiling* (it runs `udt` locally), so it ships without
+the UniObjects/UniRPC server layer — fine for builds, but a client like
+`udt-git` connects over UniObjects and needs a server. `setup-udt-server.sh`
+adds that layer (the UniRPC service map, a PAM login service, a login user, the
+libgit2 ownership guard) and starts `unirpcd`. Run the container with `--init`
+so the daemon's children are reaped:
+
+```sh
+docker run -d --init --hostname unidata --shm-size=512m --name udt udt-builder:8.3.2 sleep infinity
+docker cp setup-udt-server.sh udt:/root/
+docker exec -e UDT_LOGIN_PASSWORD=secret udt sh /root/setup-udt-server.sh
+# then, from inside (or any UniObjects client):
+#   UDT_HOST=127.0.0.1 UDT_SERVICE=udcs UDT_USER=root UDT_PASSWORD=secret \
+#     udt-git -a /usr/ud83/demo init
+```
+
+See `mv_git`'s `docs/udt-demo.md` for a full download → install → init/add/commit
+transcript against the bundled `demo` account.
+
 ## Notes
 
 - **`--hostname unidata`** matches the captured install's hostname — belt and
   braces against any host binding in the licence.
 - **`--shm-size=512m`** gives SMM room; UniData uses SysV shared memory.
-- **Unirpcd** fails to start (no Unishared) and that is fine — it is only for
-  *network* clients (UniObjects/ODBC over the wire); a local builder drives
-  `udt` directly.
+- **Unirpcd** does not start by default (no Unishared) — fine for a *builder*,
+  which drives `udt` directly. To accept *network* clients (UniObjects/ODBC),
+  configure it with `setup-udt-server.sh` above.
 
 ## Files
 
@@ -90,4 +111,6 @@ Dockerfile          Rocky 8 + deps + the captured UniData install
 capture-install.sh  pull a licensed install into ud83.tar.gz (git-ignored)
 entrypoint.sh       start UniData, then exec the requested command
 build-release.sh    build + publish a release: source tar + per-arch binary tar
+setup-runner.sh     register a self-hosted GitHub Actions runner (org-level)
+setup-udt-server.sh configure the container as a UniObjects server (for demos)
 ```
