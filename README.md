@@ -134,6 +134,13 @@ auto-install + higher API limits), `MVPKG_ADMIN_USERS`,
 
 ## Test
 
+Auth + publish (no dependencies, no browser — a software authenticator drives
+the passkey ceremony):
+
+```sh
+node --test test/auth.test.js
+```
+
 End-to-end across both repos (build the client, run the registry, install):
 
 ```sh
@@ -145,6 +152,8 @@ MVX_HOME=/path/to/mvx-lang MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
 - **User registration & auth** — **done.** Register/sign-in, sessions, and
   **passkeys (WebAuthn)** at `/account` and `/login`; dependency-free (own
   CBOR/COSE parsing + `crypto` verification in [`lib/webauthn.js`](lib/webauthn.js)).
+  **Per-user publish tokens** let a CLI/CI publish headlessly (`X-Auth-Token`
+  header on `POST /packages`), alongside the admin `MVPKG_PUBLISH_TOKEN`.
   Set `WEBAUTHN_RP_ID` + `WEBAUTHN_ORIGIN` in production; registration is
   guarded by **Cloudflare Turnstile** when `TURNSTILE_SITEKEY` +
   `TURNSTILE_SECRET` are set.
@@ -170,6 +179,7 @@ Dockerfile           runnable registry image
 docker-compose.yml   deploy (persistent data volume + .env)
 registry/            the index (runtime data; not committed)
 builder/             the UniData builder image (compile native bridges in CI)
+test/auth.test.js    auth + publish suite (register/login/passkeys/tokens)
 test/run.sh          end-to-end install-loop test (client + registry)
 ```
 

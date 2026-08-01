@@ -124,15 +124,18 @@ test('auth + publish', async (t) => {
 
   // fixture manifest server — the generic provider fetches a bare mvpkg.json
   const fixture = http.createServer((rq, rs) => {
+    const n = new URL(rq.url, 'http://x').searchParams.get('n') || 'demoscope/thing';
     rs.writeHead(200, { 'Content-Type': 'application/json' });
-    rs.end(JSON.stringify({ name: 'demoscope/thing', description: 'a fixture package', license: 'GPL-2.0-only' }));
+    rs.end(JSON.stringify({ name: n, description: 'a fixture package', license: 'GPL-2.0-only' }));
   });
   await new Promise(r => fixture.listen(0, r));
-  const source = `http://127.0.0.1:${fixture.address().port}/mvpkg.json`;
+  const sourceFor = n => `http://127.0.0.1:${fixture.address().port}/mvpkg.json?n=${encodeURIComponent(n)}`;
+  const source = sourceFor('demoscope/thing');
 
   // start the real server on the throwaway registry dir
+  const ADMIN_TOKEN = 'adm_' + crypto.randomBytes(16).toString('base64url');
   const srv = spawn(process.execPath, [path.join(ROOT, 'server.js'), String(port)], {
-    env: { ...process.env, MVPKG_REGISTRY_DIR: regdir, MVPKG_ADMIN_USERS: '' },
+    env: { ...process.env, MVPKG_REGISTRY_DIR: regdir, MVPKG_ADMIN_USERS: '', MVPKG_PUBLISH_TOKEN: ADMIN_TOKEN },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const logs = [];
@@ -232,6 +235,52 @@ test('auth + publish', async (t) => {
     assert.ok(fs.existsSync(path.join(regdir, 'demoscope', 'thing', 'meta.json')), 'bob could not remove');
     await post('/packages/remove', { name: 'demoscope/thing' });   // alice, the owner
     assert.ok(!fs.existsSync(path.join(regdir, 'demoscope', 'thing')), 'owner removed it');
+  });
+
+  await t.test('per-user token publishes headlessly and sets owner', async () => {
+    // alice (signed in) mints a token; it is shown once in the account page HTML
+    const mk = await post('/account/tokens', { name: 'ci' });
+    assert.strictEqual(mk.status, 200);
+    const tok = (mk.body.match(/mvp_[A-Za-z0-9_-]+/) || [])[0];
+    assert.ok(tok, 'token revealed once');
+    // a headless client (no session) publishes with X-Auth-Token -> JSON
+    const cli = makeClient(port, host);
+    const r = await cli('POST', '/packages', { body: form({ source: sourceFor('tokscope/pkg') }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Auth-Token': tok } });
+    assert.strictEqual(r.status, 200, r.body);
+    assert.strictEqual(JSON.parse(r.body).name, 'tokscope/pkg');
+    const meta = JSON.parse(fs.readFileSync(path.join(regdir, 'tokscope', 'pkg', 'meta.json'), 'utf8'));
+    assert.strictEqual(meta.owner, 'alice');
+  });
+
+  await t.test('a bad token is rejected 401 (no fallthrough to a session)', async () => {
+    const cli = makeClient(port, host);
+    const r = await cli('POST', '/packages', { body: form({ source: sourceFor('tokscope/nope') }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Auth-Token': 'mvp_not_a_real_token' } });
+    assert.strictEqual(r.status, 401, r.body);
+    assert.ok(!fs.existsSync(path.join(regdir, 'tokscope', 'nope')));
+  });
+
+  await t.test("a token cannot claim another user's package", async () => {
+    // bob mints a token, then tries to publish to alice-owned tokscope/pkg
+    const bob = makeClient(port, host);
+    await bob('POST', '/login', { body: form({ username: 'bob', password: 'correcthorse2' }), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const mk = await bob('POST', '/account/tokens', { body: form({ name: 'bobci' }), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const btok = (mk.body.match(/mvp_[A-Za-z0-9_-]+/) || [])[0];
+    const cli = makeClient(port, host);
+    const r = await cli('POST', '/packages', { body: form({ source: sourceFor('tokscope/pkg') }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Auth-Token': btok } });
+    assert.strictEqual(r.status, 400);
+    assert.match(r.body, /owned by alice/i);
+  });
+
+  await t.test('admin token publishes to / removes any package', async () => {
+    const cli = makeClient(port, host);
+    // admin token can remove alice's package
+    const rm = await cli('POST', '/packages/remove', { body: form({ name: 'tokscope/pkg' }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Auth-Token': ADMIN_TOKEN } });
+    assert.strictEqual(rm.status, 200, rm.body);
+    assert.ok(!fs.existsSync(path.join(regdir, 'tokscope', 'pkg')), 'admin token removed it');
   });
 
   await t.test('logout clears the session', async () => {

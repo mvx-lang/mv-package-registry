@@ -71,7 +71,7 @@ const ADMIN_TOKEN = process.env.MVPKG_PUBLISH_TOKEN || '';   // optional admin p
 // admin (can publish to / manage any package).  Bootstraps the first admin
 // without anyone having to set a password on their behalf.
 const ADMIN_USERS = (process.env.MVPKG_ADMIN_USERS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-const isAdminUser = u => u && ADMIN_USERS.includes(String(u.username).toLowerCase());
+const isAdminUser = u => !!u && (u.isAdmin === true || ADMIN_USERS.includes(String(u.username).toLowerCase()));
 fs.mkdirSync(USERDIR, { recursive: true });
 
 // Server secret for signing session cookies — generated once, persisted.
@@ -150,6 +150,23 @@ function findUserByToken(tok) {
   }
   return null;
 }
+// Resolve the actor for a write API call: an X-Auth-Token header (a per-user
+// publish token, or the admin MVPKG_PUBLISH_TOKEN) authenticates a headless
+// client (CLI/CI) the same way a signed-cookie session authenticates the
+// browser.  Returns { user, viaToken } or null.  The admin token acts as an
+// unowned admin (isAdmin) so it can publish to / manage any package.
+function tokenActor(req) {
+  const tok = req.headers['x-auth-token'];
+  if (!tok) return null;
+  if (ADMIN_TOKEN) {
+    const a = Buffer.from(String(tok)), b = Buffer.from(ADMIN_TOKEN);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b))
+      return { user: { username: null, isAdmin: true }, viaToken: true };
+  }
+  const u = findUserByToken(tok);
+  return u ? { user: u, viaToken: true } : null;
+}
+const tokenAttempt = req => !!req.headers['x-auth-token'];
 
 function findUserByCredId(credId) {
   let files; try { files = fs.readdirSync(USERDIR); } catch { return null; }
@@ -467,6 +484,16 @@ function accountPage(user, opts) {
         <div><b>${esc(p.name || 'passkey')}</b> <span class="badge">${esc(p.kind || 'ec')}</span><br><span class="meta">added ${new Date(p.created).toISOString().slice(0, 10)}${p.lastUsed ? ' &middot; last used ' + new Date(p.lastUsed).toISOString().slice(0, 10) : ''}</span></div>
         <form method="post" action="/account/passkeys/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(p.credId)}"><button style="padding:4px 12px">Remove</button></form></div>`).join('')
     : '<p class="meta">No passkeys yet.</p>';
+  const toks = (user.tokens || []).length
+    ? (user.tokens || []).map(t => `<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+        <div><b>${esc(t.name || 'token')}</b><br><span class="meta">created ${new Date(t.created).toISOString().slice(0, 10)}${t.lastUsed ? ' &middot; last used ' + new Date(t.lastUsed).toISOString().slice(0, 10) : ' &middot; never used'}</span></div>
+        <form method="post" action="/account/tokens/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(t.id)}"><button style="padding:4px 12px">Revoke</button></form></div>`).join('')
+    : '<p class="meta">No tokens yet.</p>';
+  const freshTok = opts.freshToken
+    ? `<div class="msg ok">New token — copy it now, it is shown only once:<br><code>${esc(opts.freshToken)}</code><br>
+       <span class="meta">Send it as the <code>X-Auth-Token</code> header to publish without signing in, e.g.<br>
+       <code>curl -H "X-Auth-Token: ${esc(opts.freshToken)}" -d "source=https://&hellip;/your-package" ${esc(BASE_URL)}/packages</code></span></div>`
+    : '';
   const a = opts.added;
   const addMsg = a
     ? `<div class="msg ok">Added <code>${esc(a.name)}</code>${a.installed ? ' — release tracking installed; new releases appear here automatically.' : (a.note ? ' — <span class="meta">' + esc(a.note) + '</span>' : '')}</div>`
@@ -484,7 +511,14 @@ function accountPage(user, opts) {
        <input type="text" name="package" placeholder="mvx-lang/git">
        <div style="margin-top:10px"><button class="primary" type="submit">Add package</button></div>
      </form>
-     <p class="meta">The registry indexes your package and tracks its releases &mdash; it hosts nothing; downloads come from the source.</p>`, user);
+     <p class="meta">The registry indexes your package and tracks its releases &mdash; it hosts nothing; downloads come from the source.</p>
+     <h3 style="margin-top:24px">Publish tokens</h3>
+     <p class="meta">Publish from a script or CI without signing in &mdash; send the token as the <code>X-Auth-Token</code> header.</p>
+     ${freshTok}${toks}
+     <form method="post" action="/account/tokens" style="margin-top:14px">
+       <input type="text" name="name" placeholder="token name (e.g. ci)" style="max-width:280px">
+       <button class="primary" type="submit">Create token</button>
+     </form>`, user);
 }
 
 // ---- packages: a source-tracked index (no hosting) ------------------
@@ -763,27 +797,34 @@ const server = http.createServer((req, res) => {
         user.passkeys = (user.passkeys || []).filter(p => p.credId !== form.id);
         saveUser(user); return redirect(res, '/account');
       }
-      // Add a package by pasting its source URL (repo or mvpkg.json).  The
-      // provider reads the manifest, records the source, installs release
-      // tracking where it can, and indexes the current release.
+      // Add a package by its source URL (repo or mvpkg.json).  The provider
+      // reads the manifest, records the source, installs release tracking where
+      // it can, and indexes the current release.  Authenticated by a browser
+      // session (HTML response) OR an X-Auth-Token header (JSON response) so a
+      // headless client — CLI/CI — can publish non-interactively.
       if (u.pathname === '/packages') {
-        if (!user) return redirect(res, '/login');
-        addPackage(user, form.source, form.package, (err, r) => {
-          if (err) return sendHTML(res, 400, accountPage(user, { addError: err.message }));
-          return sendHTML(res, 200, accountPage(loadUser(user.username), { added: r }));
+        const actor = user ? { user, viaToken: false } : tokenActor(req);
+        if (!actor) return tokenAttempt(req) ? sendJSON(res, 401, { error: 'bad or missing token' }) : redirect(res, '/login');
+        addPackage(actor.user, form.source, form.package, (err, r) => {
+          if (actor.viaToken) return err ? sendJSON(res, 400, { error: err.message }) : sendJSON(res, 200, r);
+          if (err) return sendHTML(res, 400, accountPage(actor.user, { addError: err.message }));
+          return sendHTML(res, 200, accountPage(loadUser(actor.user.username), { added: r }));
         });
         return;                                          // response sent asynchronously
       }
       if (u.pathname === '/packages/remove') {
-        if (!user) return redirect(res, '/login');
+        const actor = user ? { user, viaToken: false } : tokenActor(req);
+        if (!actor) return tokenAttempt(req) ? sendJSON(res, 401, { error: 'bad or missing token' }) : redirect(res, '/login');
         const pkg = loadPackage(String(form.name || '').trim());
-        if (pkg && (pkg.owner === user.username || isAdminUser(user))) {
+        const allowed = pkg && (pkg.owner === actor.user.username || isAdminUser(actor.user));
+        if (allowed) {
           if (pkg.tracking && pkg.tracking.hookId) {
             const prov = providers.byName(pkg.tracking.provider);
             if (prov && prov.removeTracking) prov.removeTracking(pkg.tracking.ref, { hookId: pkg.tracking.hookId }, () => {});
           }
           try { fs.rmSync(path.join(REGDIR, pkg.name), { recursive: true, force: true }); } catch {}
         }
+        if (actor.viaToken) return allowed ? sendJSON(res, 200, { removed: pkg.name }) : sendJSON(res, pkg ? 403 : 404, { error: pkg ? 'not owner' : 'no such package' });
         return redirect(res, '/account');
       }
       if (u.pathname === '/register') return handleRegister(req, res, form);
