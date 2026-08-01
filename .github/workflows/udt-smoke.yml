@@ -41,6 +41,7 @@ jobs:
 
       - name: The build toolchain is present in the container
         shell: bash
+        # shellcheck disable=SC2016  # $UDTHOME is expanded inside the container by udt-run, not here
         run: |
           udt-run 'set -e
             echo "UDTHOME=$UDTHOME"
