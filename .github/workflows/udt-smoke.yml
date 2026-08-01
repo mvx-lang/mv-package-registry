@@ -1,0 +1,63 @@
+# Sanity-check that a self-hosted `udt` runner is wired up: the udt-builder
+# image is present, setup-udt exposes `udt-run`, the UniData + C toolchain a
+# build needs are inside it, and udt-run's mount/chown round-trip works (so a
+# build never leaves a root-owned file that blocks the next checkout).
+#
+# Manual only — it needs the self-hosted runner, which may not always be online.
+# Actions -> udt runner smoke -> Run workflow.  Copyright (C) 2026 Gordon Heydon.
+name: udt runner smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'udt-builder image to test (default udt-builder:8.3.2).'
+        required: false
+        default: udt-builder:8.3.2
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, udt]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up the UniData toolchain
+        id: setup
+        uses: ./.github/actions/setup-udt
+        with:
+          image: ${{ inputs.image }}
+
+      - name: setup-udt reported the image and put udt-run on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ steps.setup.outputs.image }}"
+          command -v udt-run
+          echo "image: ${{ steps.setup.outputs.image }}"
+
+      - name: The build toolchain is present in the container
+        shell: bash
+        run: |
+          udt-run 'set -e
+            echo "UDTHOME=$UDTHOME"
+            test -x "$UDTHOME/bin/udt"   && echo "udt:  ok"
+            command -v gcc >/dev/null    && echo "gcc:  $(gcc --version | head -1)"'
+
+      - name: udt-run mount + chown round-trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          # the (root) container writes into the mounted workdir…
+          udt-run 'printf ok > udt-smoke.txt'
+          test -f udt-smoke.txt && [ "$(cat udt-smoke.txt)" = ok ]
+          # …and udt-run must have chowned it back to the runner user, else the
+          # next checkout would fail on a root-owned file.
+          owner=$(stat -c '%U' udt-smoke.txt 2>/dev/null || stat -f '%Su' udt-smoke.txt)
+          echo "owner: $owner (runner: $(id -un))"
+          test "$owner" = "$(id -un)"
+          rm -f udt-smoke.txt
+          echo "smoke: runner + image wired up correctly"
