@@ -17,8 +17,19 @@ A release is multiple **artifacts** with a shared naming key:
 | | where | what |
 |---|---|---|
 | **publish-source** | `mvx-lang/mvx/.github/actions/publish-source` | tar the source + attach `…-source.tar.gz` (any GitHub-hosted runner). |
-| **udt-build** | [`actions/udt-build`](actions/udt-build) | build a UniData binary in the `udt-builder` container + attach `…-udt-…​.tar.gz` (self-hosted `udt` runner). |
+| **setup-udt** | [`actions/setup-udt`](actions/setup-udt) | verify the licensed `udt-builder` image + put a `udt-run` wrapper on PATH (self-hosted `udt` runner). |
+| **udt-build** | [`actions/udt-build`](actions/udt-build) | build a UniData binary via setup-udt + `build-udt.sh` and attach `…-udt-…​.tar.gz`. |
 | **udt-release** | [`workflows/udt-release.yml`](workflows/udt-release.yml) | reusable workflow wrapping udt-build (checkout + build + publish). |
+
+`setup-udt` is the UniData analogue of `setup-mvx` / the dconsole action — but
+because UniData is **licensed and cannot be distributed**, it installs nothing;
+it verifies the image already on the self-hosted runner and exposes it through
+`udt-run`. So any step can use the licensed toolchain:
+
+```yaml
+- uses: mvx-lang/mv-package-registry/.github/actions/setup-udt@main
+- run: udt-run 'BASIC BP MYPROG'      # runs inside the licensed container
+```
 
 The **mvx** binary (Linux) builds on a GitHub-hosted runner via
 `mvx-lang/mvx/.github/actions/setup-mvx`; it needs no self-hosted host.

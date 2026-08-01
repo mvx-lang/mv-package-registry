@@ -1,0 +1,31 @@
+#!/bin/sh
+# udt-run <command...> — run a command inside the licensed udt-builder container,
+# with the current directory mounted at /pkg (the working dir).  Installed on
+# PATH by the setup-udt action, so a self-hosted-runner workflow can use the
+# licensed UniData toolchain the same way `dconsole`/`setup-mvx` expose a
+# distributable one — except the tool stays on the runner (it cannot be shipped).
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+#   udt-run 'BASIC BP MYPROG'         # run BASIC / any udt command
+#   udt-run sh build-udt.sh /pkg/dist # …or a build script
+#
+# The arguments are joined and run as a shell command line inside the container
+# (a login shell, so $UDTHOME etc. are set).  The container runs as root, so
+# files it creates in the mounted tree are chowned back to the runner user on
+# the way out — otherwise a root-owned file blocks the runner's next checkout.
+set -eu
+
+IMAGE="${UDT_BUILDER_IMAGE:-udt-builder:8.3.2}"
+[ "$#" -gt 0 ] || { echo "usage: udt-run <command...>" >&2; exit 2; }
+UDT_RUN_CMD="$*"
+export UDT_RUN_CMD
+
+# --hostname unidata matches the captured install (belt and braces against any
+# host binding in the licence).  GITHUB_REF_NAME is forwarded so a build script
+# can stamp the version.
+exec docker run --rm --hostname unidata \
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -e GITHUB_REF_NAME="${GITHUB_REF_NAME:-}" \
+  -e UDT_RUN_CMD \
+  -v "$PWD":/pkg -w /pkg "$IMAGE" \
+  bash -lc 'rc=0; eval "$UDT_RUN_CMD" || rc=$?; chown -R "$HOST_UID:$HOST_GID" . 2>/dev/null || true; exit $rc'

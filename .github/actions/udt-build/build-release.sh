@@ -1,20 +1,18 @@
 #!/bin/sh
-# mv-package-registry — drive the udt-builder container to build one package's
-# UniData binary release tar.  Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+# mv-package-registry — build one package's UniData binary release tar.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
 #
-# Native UniData binaries can only be built on a licensed UniData install, so
-# this runs on a self-hosted runner that has Docker and the `udt-builder` image
-# (built from a captured licence — see ../../../builder/README.md).  The action
-# `udt-build` carries this script so a caller in another repo needn't check the
-# registry out.
+# Runs on a self-hosted runner that has the licensed `udt-builder` image and the
+# `udt-run` wrapper on PATH (from the setup-udt action).  The udt-build action
+# carries this script so a caller in another repo needn't check the registry out.
 #
 #   GITHUB_REF_NAME=<version>  sh build-release.sh <package-name>
 #
 # Contract: the package repo (the current directory) provides `build-udt.sh`,
-# which — run INSIDE the container at the repo root — stages the release tree
+# which — run INSIDE the container at the repo root — stages its release tree
 # (contents at the root, no wrapping dir) into the directory given as $1.  This
-# script wraps that with the parts every package shares: the image check, the
-# artifact key, running the container, and the tar + checksum.
+# script wraps that with the parts every package shares: the artifact key, the
+# staged build (via udt-run), and the tar + checksum.
 #
 # It writes  <base>-<version>-udt-<os>-<arch>-<endian>.tar.gz  (+ .sha256) to
 # the current directory — base = package name with '/'->'_', the key the
@@ -24,11 +22,9 @@ set -eu
 
 PKG="${1:?usage: GITHUB_REF_NAME=<ver> build-release.sh <package-name>  (e.g. mvx-lang/git)}"
 VER="${GITHUB_REF_NAME:?set GITHUB_REF_NAME to the version tag}"
-IMAGE="${UDT_BUILDER_IMAGE:-udt-builder:8.3.2}"
 
-command -v docker >/dev/null 2>&1 || { echo "::error::docker not found on this runner" >&2; exit 1; }
-docker image inspect "$IMAGE" >/dev/null 2>&1 || {
-  echo "::error::udt-builder image '$IMAGE' not on this runner (see mv-package-registry/builder/README.md)" >&2; exit 1; }
+command -v udt-run >/dev/null 2>&1 || {
+  echo "::error::udt-run not on PATH — run the setup-udt action first" >&2; exit 1; }
 [ -f build-udt.sh ] || {
   echo "::error::$PKG has no build-udt.sh — it must stage the release tree into \$1" >&2; exit 1; }
 
@@ -42,18 +38,9 @@ case "$(printf '\1\2' | od -An -tx2 | tr -d ' \n')" in
 esac
 BASE="${BASE_NAME}-${VER}-udt-${OS}-${ARCH}-${ENDIAN}"
 
-# Build + stage inside the container.  The container runs as root, so a
-# root-owned dist/ left in the mounted workspace would block the runner's next
-# checkout — chown it back to the runner user.  --hostname unidata matches the
-# captured install (belt and braces against any host binding in the licence).
-docker run --rm --hostname unidata \
-  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e GITHUB_REF_NAME="$VER" \
-  -v "$PWD":/pkg -w /pkg "$IMAGE" bash -lc '
-    set -e
-    rm -rf dist && mkdir -p dist
-    sh build-udt.sh "$(pwd)/dist"
-    chown -R "$HOST_UID:$HOST_GID" dist
-  '
+# Build + stage inside the licensed container (udt-run mounts . at /pkg and
+# chowns anything root created back to the runner user).
+udt-run 'rm -rf dist && mkdir -p dist && sh build-udt.sh /pkg/dist'
 [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ] || {
   echo "::error::build-udt.sh produced no dist/ tree" >&2; exit 1; }
 

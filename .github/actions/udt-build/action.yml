@@ -41,11 +41,15 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Set up the UniData toolchain (puts udt-run on PATH)
+      uses: mvx-lang/mv-package-registry/.github/actions/setup-udt@main
+      with:
+        image: ${{ inputs.image }}
+
     - id: build
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
-        UDT_BUILDER_IMAGE: ${{ inputs.image }}
       run: sh "$GITHUB_ACTION_PATH/build-release.sh" "$PACKAGE"
 
     - name: Publish the UniData binary asset

@@ -1,0 +1,49 @@
+# mv-package-registry — set up the licensed UniData toolchain on a self-hosted
+# runner.  Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# The UniData analogue of setup-mvx / the dconsole action: it makes the tool
+# available for later steps.  But UniData is licensed and cannot be distributed,
+# so nothing is downloaded — instead this verifies the `udt-builder` image is
+# already on the (self-hosted) runner and puts a `udt-run` wrapper on PATH, so
+# subsequent steps run any command inside the licensed container:
+#
+#   runs-on: [self-hosted, linux, udt]
+#   steps:
+#     - uses: actions/checkout@v5
+#     - uses: mvx-lang/mv-package-registry/.github/actions/setup-udt@main
+#     - run: udt-run 'BASIC BP MYPROG'
+#     - run: udt-run sh build-udt.sh /pkg/dist
+name: Setup UniData builder
+description: Verify the licensed udt-builder image on a self-hosted runner and put a `udt-run` wrapper on PATH for later steps.
+
+inputs:
+  image:
+    description: The udt-builder image on the runner.
+    required: false
+    default: udt-builder:8.3.2
+
+outputs:
+  image:
+    description: The udt-builder image in effect.
+    value: ${{ steps.setup.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - id: setup
+      shell: bash
+      env:
+        UDT_BUILDER_IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        command -v docker >/dev/null 2>&1 || { echo "::error::docker not found on this runner"; exit 1; }
+        docker image inspect "$UDT_BUILDER_IMAGE" >/dev/null 2>&1 || {
+          echo "::error::udt-builder image '$UDT_BUILDER_IMAGE' not on this runner (see mv-package-registry/builder/README.md)"; exit 1; }
+        # Put `udt-run` on PATH and pin the image for the rest of the job.
+        BIN="$RUNNER_TEMP/udt-bin"
+        mkdir -p "$BIN"
+        install -m 0755 "$GITHUB_ACTION_PATH/udt-run" "$BIN/udt-run"
+        echo "$BIN" >> "$GITHUB_PATH"
+        echo "UDT_BUILDER_IMAGE=$UDT_BUILDER_IMAGE" >> "$GITHUB_ENV"
+        echo "image=$UDT_BUILDER_IMAGE" >> "$GITHUB_OUTPUT"
+        echo "setup-udt: udt-run ready (image $UDT_BUILDER_IMAGE)"
