@@ -869,6 +869,40 @@ server.listen(PORT, () => {
   console.log('  a package is added from its source URL; the registry hosts nothing.');
 });
 
+// Refresh a package's manifest-derived metadata (description, license,
+// dependencies, systems) and its README from the source, so the index stays
+// current when a package edits its mvpkg.json or README without re-adding.
+// Change-aware: writes only when something actually differs.  cb() when done.
+function refreshMeta(pkg, cb) {
+  const prov = providers.byName(pkg.tracking && pkg.tracking.provider);
+  const ref = pkg.tracking && pkg.tracking.ref;
+  if (!prov || !prov.fetchManifest || !ref) return cb();
+  prov.fetchManifest(ref, (e, txt) => {
+    const fresh = loadPackage(pkg.name);
+    if (!fresh) return cb();
+    let changed = false;
+    if (!e && txt) { try {
+      const j = JSON.parse(txt);
+      if (j.description && j.description !== fresh.description) { fresh.description = j.description; changed = true; }
+      if (j.license && j.license !== fresh.license) { fresh.license = j.license; changed = true; }
+      const deps = Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || '');
+      if (deps && deps !== fresh.dependencies) { fresh.dependencies = deps; changed = true; }
+      if (Array.isArray(j.systems) && j.systems.length) {
+        const sys = [...new Set([...(fresh.systems || []), ...j.systems])];   // additive (binaries also add systems)
+        if (sys.length !== (fresh.systems || []).length) { fresh.systems = sys; changed = true; }
+      }
+    } catch {} }
+    const finish = () => {
+      if (changed) { fresh.updated = Date.now(); savePackage(fresh); console.log(`poll: ${pkg.name} metadata refreshed`); }
+      cb();
+    };
+    if (prov.fetchFile) prov.fetchFile(ref, 'README.md', (er, rd) => {
+      if (rd && rd !== fresh.readme) { fresh.readme = rd; changed = true; }
+      finish();
+    }); else finish();
+  });
+}
+
 // Poll tracked packages for new releases — the fallback to a webhook, and how
 // providers without push tracking (e.g. GitLab for now) are picked up at all.
 const POLL_MS = Number(process.env.GITHUB_POLL_MS || 15 * 60 * 1000);
@@ -877,23 +911,28 @@ if (POLL_MS > 0) setInterval(() => {
     if (!pkg.tracking || !pkg.tracking.provider) continue;
     const prov = providers.byName(pkg.tracking.provider);
     if (!prov) continue;
-    prov.latestRelease(pkg.tracking.ref, (e, rel) => {
-      if (e || !rel || !rel.version) return;
-      // indexRelease is change-aware, so call it every poll: it picks up a new
-      // version AND late-arriving assets on the current one (a binary built by
-      // a later CI job the "published" webhook did not yet see).
-      const fresh = loadPackage(pkg.name);
-      if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`poll: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
-    });
-    // One-time backfill of the release history for packages indexed before the
-    // Versions sidebar existed (the poll above only tracks the latest release).
-    if (!pkg.versions && prov.listVersions) prov.listVersions(pkg.tracking.ref, (e, vers) => {
-      if (e || !vers || !vers.length) return;
-      const fresh = loadPackage(pkg.name);
-      if (!fresh) return;
-      vers.forEach(v => mergeVersion(fresh, v));
-      savePackage(fresh);
-      console.log(`poll: ${pkg.name} backfilled ${vers.length} version(s)`);
+    // Serialize the per-package updates — each loads then saves the meta, so
+    // running them in sequence avoids clobbering one another's fields:
+    // manifest + README, then the latest release, then the version-history backfill.
+    refreshMeta(pkg, () => {
+      prov.latestRelease(pkg.tracking.ref, (e, rel) => {
+        // indexRelease is change-aware: it picks up a new version AND late-arriving
+        // assets on the current one (a binary from a later CI job the webhook missed).
+        if (!e && rel && rel.version) {
+          const fresh = loadPackage(pkg.name);
+          if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`poll: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
+        }
+        // One-time backfill of the release history for packages indexed before
+        // the Versions sidebar existed (the latest-release poll misses history).
+        if (!pkg.versions && prov.listVersions) prov.listVersions(pkg.tracking.ref, (e2, vers) => {
+          if (e2 || !vers || !vers.length) return;
+          const f2 = loadPackage(pkg.name);
+          if (!f2) return;
+          vers.forEach(v => mergeVersion(f2, v));
+          savePackage(f2);
+          console.log(`poll: ${pkg.name} backfilled ${vers.length} version(s)`);
+        });
+      });
     });
   }
 }, POLL_MS).unref();
