@@ -1,0 +1,6 @@
+# actionlint config: declare the self-hosted runner labels this project uses,
+# so `runs-on: [self-hosted, linux, udt]` does not warn.  The `udt` runner is a
+# licensed UniData build host (see builder/README.md).
+self-hosted-runner:
+  labels:
+    - udt

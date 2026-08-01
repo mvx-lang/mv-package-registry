@@ -1,0 +1,63 @@
+# Build + publish a package's UniData binary release on the self-hosted udt
+# runner.  Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# Two ways in:
+#   workflow_call  — a package repo's own release.yml calls this on its tag push
+#                    (runs in the caller's context; publishes to the caller's
+#                    release).  See .github/README.md for the caller snippet.
+#   workflow_dispatch — run it by hand from this repo's Actions tab to (re)build
+#                    a chosen package repo at a chosen tag (cross-repo: needs a
+#                    PACKAGE_TOKEN secret that can read the repo and write its
+#                    release).
+#
+# The job runs on the self-hosted RedHat/Rocky runner (label `udt`) that has
+# Docker + the licensed udt-builder image.  The package must ship a build-udt.sh
+# that stages its release tree into $1 (see the udt-build action).
+name: udt-release
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: 'Package name, e.g. mvx-lang/git (base = name with / -> _).'
+        required: true
+        type: string
+    secrets:
+      package-token:
+        description: Token to publish the release; defaults to the caller's GITHUB_TOKEN.
+        required: false
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package name, e.g. mvx-lang/git.'
+        required: true
+        type: string
+      repository:
+        description: 'Package repo to build (owner/name).'
+        required: true
+        type: string
+      ref:
+        description: 'Tag or branch to build.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  udt-binary:
+    runs-on: [self-hosted, linux, udt]
+    steps:
+      - name: Check out the package
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
+          token: ${{ secrets.package-token || github.token }}
+
+      - name: Build + publish the UniData binary
+        uses: mvx-lang/mv-package-registry/.github/actions/udt-build@main
+        with:
+          package: ${{ inputs.package }}
+          repository: ${{ inputs.repository || github.repository }}
+          token: ${{ secrets.package-token || github.token }}
