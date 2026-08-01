@@ -719,6 +719,29 @@ function selectArtifact(meta, system, os, arch, endian) {
     description: meta.description || '', dependencies: meta.dependencies || '',
     license: meta.license || '', sourceIncluded,
     systems: meta.systems || [], owner: meta.owner, selected,
+    versions: (meta.versions || []).map(v => v.version).join(' '),
+  };
+}
+
+// Resolve /package to an EXACT prior version: the client picks a version from
+// the `versions` list (per its dependency constraint) and asks for it.  The
+// current version returns its real resolved artifact; an older one is served as
+// its source asset, whose URL is deterministic — <source>/releases/download/
+// <tag>/<base>-<version>-source.tar.gz (base = name '/'->'_').  Returns null if
+// the version is unknown.
+function resolveExactVersion(meta, version, system, os, arch, endian) {
+  if (meta.version === version)
+    return selectArtifact(meta, system, os, arch, endian);
+  const v = (meta.versions || []).find(x => x.version === version);
+  if (!v) return null;
+  const base = meta.name.replace(/\//g, '_');
+  const tarball = `${meta.source}/releases/download/${v.tag || version}/${base}-${version}-source.tar.gz`;
+  return {
+    name: meta.name, version, tarball,
+    description: meta.description || '', dependencies: meta.dependencies || '',
+    license: meta.license || '', sourceIncluded: true,
+    systems: meta.systems || [], owner: meta.owner, selected: 'source',
+    versions: (meta.versions || []).map(x => x.version).join(' '),
   };
 }
 
@@ -914,7 +937,13 @@ const server = http.createServer((req, res) => {
     if (!okName(nm)) return sendJSON(res, 404, { error: 'not found' });
     const meta = loadPackage(nm);
     if (!meta) return sendJSON(res, 404, { error: 'not found' });
-    // ?system=&arch= -> tarball resolved to the best matching artifact
+    // ?version=<exact> -> that version (for a client resolving a constraint);
+    // else the latest.  Both carry the `versions` list and ?system=&arch=
+    // artifact resolution.
+    if (u.query.version) {
+      const r = resolveExactVersion(meta, String(u.query.version), u.query.system, u.query.os, u.query.arch, u.query.endian);
+      return r ? sendJSON(res, 200, r) : sendJSON(res, 404, { error: 'no such version' });
+    }
     return sendJSON(res, 200, selectArtifact(meta, u.query.system, u.query.os, u.query.arch, u.query.endian));
   }
   if (parts[0] === 'search') {
