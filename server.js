@@ -470,12 +470,14 @@ function accountPage(user, opts) {
   const pkgs = mine.length
     ? mine.map(p => {
         const t = p.tracking || {};
-        const track = t.hookId ? 'auto-updating on release &#10003;' : (t.provider ? 'tracked (polling)' : 'not tracked');
+        const track = t.hookId ? 'auto-updating on release &#10003;' : (t.provider ? 'no webhook — use Refresh to catch up' : 'not tracked');
         return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div>
           <b><a href="/p/${esc(p.name)}">${esc(p.name)}</a></b> <span class="v">${esc(p.version || '—')}</span><br>
           <span class="meta">source: ${p.source ? '<a href="' + esc(p.source) + '">' + esc(p.source) + '</a>' : 'unknown'}</span><br>
           <span class="meta">releases: ${esc(track)}</span></div>
-          <form method="post" action="/packages/remove" style="margin:0" onsubmit="return confirm('Remove ${esc(p.name)} from the index?')"><input type="hidden" name="name" value="${esc(p.name)}"><button style="padding:4px 12px">Remove</button></form></div></div>`;
+          <div style="display:flex;gap:6px">
+          <form method="post" action="/packages/refresh" style="margin:0"><input type="hidden" name="name" value="${esc(p.name)}"><button style="padding:4px 12px" title="Check the source for new releases now">Refresh</button></form>
+          <form method="post" action="/packages/remove" style="margin:0" onsubmit="return confirm('Remove ${esc(p.name)} from the index?')"><input type="hidden" name="name" value="${esc(p.name)}"><button style="padding:4px 12px">Remove</button></form></div></div></div>`;
       }).join('')
     : '<p class="meta">No packages yet — add one below by pasting its source URL.</p>';
   const adminBadge = isAdminUser(user) ? ' <span class="badge" style="border-color:var(--acc);color:var(--acc)">admin</span>' : '';
@@ -499,11 +501,12 @@ function accountPage(user, opts) {
     ? `<div class="msg ok">Added <code>${esc(a.name)}</code>${a.installed ? ' — release tracking installed; new releases appear here automatically.' : (a.note ? ' — <span class="meta">' + esc(a.note) + '</span>' : '')}</div>`
     : '';
   const addErr = opts.addError ? `<div class="msg err">${esc(opts.addError)}</div>` : '';
+  const refMsg = opts.refreshed ? `<div class="msg ok">Refreshed <code>${esc(opts.refreshed)}</code> from its source.</div>` : '';
   return page('Account — mv_package',
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
      <h3 style="margin-top:24px">Passkeys</h3>${pks}
      <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
-     <h3 style="margin-top:24px">Your packages</h3>${addMsg}${addErr}${pkgs}
+     <h3 style="margin-top:24px">Your packages</h3>${addMsg}${addErr}${refMsg}${pkgs}
      <form method="post" action="/packages" style="margin-top:14px">
        <label>Add a package — paste its <b>source URL</b> (a repository, or a link to its <code>mvpkg.json</code>)</label>
        <input type="text" name="source" placeholder="https://&hellip;/your-package   &middot;   or a link to its mvpkg.json" required>
@@ -559,8 +562,8 @@ function artifactsFromRelease(pkg, rel) {
 // Index a release's assets onto a package: refresh version + artifacts (all
 // external), keep source/tracking/owner.  Idempotent and change-aware — writes
 // only when the version or the asset set actually changed, so it is safe to
-// call on every poll (release assets can arrive AFTER the initial publish, e.g.
-// a binary built by a later CI job that the "published" webhook missed).
+// call on every webhook or refresh (release assets can arrive AFTER the first
+// event, e.g. a binary built by a later CI job the "published" webhook missed).
 // Returns the artifact count when it (re)indexed, else 0.
 function indexRelease(pkg, rel) {
   if (!rel || !rel.version) return 0;
@@ -678,7 +681,7 @@ function addPackage(user, source, pkgOverride, cb) {
           indexLatest(!herr && !!hook, herr ? herr.message : null);
         });
       } else {
-        indexLatest(false, 'Releases are picked up by polling (this source has no push webhook).');
+        indexLatest(false, 'This source has no push webhook — use Refresh to pick up new releases.');
       }
     }));
   });
@@ -761,6 +764,9 @@ const server = http.createServer((req, res) => {
           const fresh = loadPackage(pkg.name);
           const n = fresh ? indexRelease(fresh, v.release) : 0;
           console.log(`webhook: ${pkg.name} <- ${prov.name} release ${v.release.tag} (indexed ${n})`);
+          // A release is exactly when the manifest may have changed (description,
+          // deps, README) — refresh it here (push-driven), so we never poll.
+          refreshMeta(pkg, () => {});                     // fire-and-forget
         }
         return sendJSON(res, 200, { ok: true });
       }
@@ -826,6 +832,23 @@ const server = http.createServer((req, res) => {
         }
         if (actor.viaToken) return allowed ? sendJSON(res, 200, { removed: pkg.name }) : sendJSON(res, pkg ? 403 : 404, { error: pkg ? 'not owner' : 'no such package' });
         return redirect(res, '/account');
+      }
+      // Catch up a package on demand (a missed webhook, or a source with no push
+      // tracking) — the same work a poll would do, but for one package only, and
+      // only when asked.  Owner/admin (or their token).
+      if (u.pathname === '/packages/refresh') {
+        const actor = user ? { user, viaToken: false } : tokenActor(req);
+        if (!actor) return tokenAttempt(req) ? sendJSON(res, 401, { error: 'bad or missing token' }) : redirect(res, '/login');
+        const pkg = loadPackage(String(form.name || '').trim());
+        const allowed = pkg && (pkg.owner === actor.user.username || isAdminUser(actor.user));
+        if (!allowed) {
+          if (actor.viaToken) return sendJSON(res, pkg ? 403 : 404, { error: pkg ? 'not owner' : 'no such package' });
+          return redirect(res, '/account');
+        }
+        return refreshPackage(pkg, () => {
+          if (actor.viaToken) { const f = loadPackage(pkg.name); return sendJSON(res, 200, { name: pkg.name, version: f && f.version }); }
+          return sendHTML(res, 200, accountPage(loadUser(actor.user.username), { refreshed: pkg.name }));
+        });
       }
       if (u.pathname === '/register') return handleRegister(req, res, form);
       if (u.pathname === '/login') return handleLogin(req, res, form);
@@ -934,7 +957,7 @@ function refreshMeta(pkg, cb) {
       }
     } catch {} }
     const finish = () => {
-      if (changed) { fresh.updated = Date.now(); savePackage(fresh); console.log(`poll: ${pkg.name} metadata refreshed`); }
+      if (changed) { fresh.updated = Date.now(); savePackage(fresh); console.log(`${pkg.name}: metadata refreshed`); }
       cb();
     };
     if (prov.fetchFile) prov.fetchFile(ref, 'README.md', (er, rd) => {
@@ -944,36 +967,32 @@ function refreshMeta(pkg, cb) {
   });
 }
 
-// Poll tracked packages for new releases — the fallback to a webhook, and how
-// providers without push tracking (e.g. GitLab for now) are picked up at all.
-const POLL_MS = Number(process.env.GITHUB_POLL_MS || 15 * 60 * 1000);
-if (POLL_MS > 0) setInterval(() => {
-  for (const pkg of loadPackages()) {
-    if (!pkg.tracking || !pkg.tracking.provider) continue;
-    const prov = providers.byName(pkg.tracking.provider);
-    if (!prov) continue;
-    // Serialize the per-package updates — each loads then saves the meta, so
-    // running them in sequence avoids clobbering one another's fields:
-    // manifest + README, then the latest release, then the version-history backfill.
-    refreshMeta(pkg, () => {
-      prov.latestRelease(pkg.tracking.ref, (e, rel) => {
-        // indexRelease is change-aware: it picks up a new version AND late-arriving
-        // assets on the current one (a binary from a later CI job the webhook missed).
-        if (!e && rel && rel.version) {
-          const fresh = loadPackage(pkg.name);
-          if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`poll: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
-        }
-        // One-time backfill of the release history for packages indexed before
-        // the Versions sidebar existed (the latest-release poll misses history).
-        if (!pkg.versions && prov.listVersions) prov.listVersions(pkg.tracking.ref, (e2, vers) => {
-          if (e2 || !vers || !vers.length) return;
+// Refresh one package on demand: manifest/README, then the latest release, then
+// a version-history backfill.  Releases are normally pushed by webhook, so this
+// is NOT a timer — it is invoked explicitly (the account "Refresh" button) to
+// catch up a missed webhook or a source with no push tracking (GitLab, a bare
+// manifest).  The registry never polls every package: that does not scale.
+function refreshPackage(pkg, cb) {
+  const prov = providers.byName(pkg.tracking && pkg.tracking.provider);
+  const ref = pkg.tracking && pkg.tracking.ref;
+  if (!prov || !ref) return cb();
+  // Serialised: each step loads-then-saves the meta, so running in sequence
+  // avoids clobbering one another's fields.
+  refreshMeta(pkg, () => {
+    if (!prov.latestRelease) return cb();
+    prov.latestRelease(ref, (e, rel) => {
+      if (!e && rel && rel.version) {
+        const fresh = loadPackage(pkg.name);
+        if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`refresh: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
+      }
+      if (!pkg.versions && prov.listVersions) return prov.listVersions(ref, (e2, vers) => {
+        if (!e2 && vers && vers.length) {
           const f2 = loadPackage(pkg.name);
-          if (!f2) return;
-          vers.forEach(v => mergeVersion(f2, v));
-          savePackage(f2);
-          console.log(`poll: ${pkg.name} backfilled ${vers.length} version(s)`);
-        });
+          if (f2) { vers.forEach(v => mergeVersion(f2, v)); savePackage(f2); }
+        }
+        cb();
       });
+      cb();
     });
-  }
-}, POLL_MS).unref();
+  });
+}

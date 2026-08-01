@@ -98,14 +98,17 @@ handles it:
 
 - **github** — reads `mvpkg.json` via the Contents API, tracks releases, and
   **auto-installs a release webhook** (needs a `GITHUB_TOKEN` with
-  `admin:repo_hook`; otherwise it polls).
-- **gitlab** — manifest + releases via the API (poll-based).
+  `admin:repo_hook`).
+- **gitlab** — manifest + releases via the API (no push webhook yet).
 - **manifest** — any `mvpkg.json` URL (metadata only).
 
 The registry reads the name + description/licence/dependencies from the
-manifest, records the source, and indexes the current release.  On each new
-release (webhook or poll) it refreshes the version and the external artifact
-URLs.  It stores no bytes — downloads come from the source.
+manifest, records the source, and indexes the current release.  Updates are
+**push-driven**: a release webhook re-indexes the version, external artifact
+URLs, and manifest metadata.  The registry never polls every package (that does
+not scale); a source with no webhook — or one whose webhook was missed — is
+caught up on demand with the **Refresh** button (or `POST /packages/refresh`).
+It stores no bytes — downloads come from the source.
 
 ## Releases
 
@@ -159,9 +162,10 @@ MVX_HOME=/path/to/mvx-lang MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
   `TURNSTILE_SECRET` are set.
 - **Source providers** — **done.** A package is added from its source URL; the
   provider reads the manifest, tracks releases (a signed webhook at
-  `/webhook/<id>`, or polling), and indexes external artifacts.  GitHub is full
-  (auto-installed webhook); GitLab and a generic manifest source are
-  poll/metadata. Dependency-free ([`lib/providers.js`](lib/providers.js),
+  `/webhook/<id>`), and indexes external artifacts.  Updates are push-driven —
+  the registry does not poll; a source with no webhook (GitLab, a bare manifest)
+  is caught up on demand with **Refresh**.  GitHub is full (auto-installed
+  webhook). Dependency-free ([`lib/providers.js`](lib/providers.js),
   [`lib/github.js`](lib/github.js)).
 - **Index, not host** — **done.** The registry stores no bytes; every download
   links to the source's release asset.
