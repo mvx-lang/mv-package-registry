@@ -14,12 +14,12 @@ A package declares its metadata in a JSON manifest at its root:
 
 ```json
 {
-  "name": "mv-lang/curses",
+  "name": "mvx-lang/curses",
   "version": "1.0",
   "description": "ncurses terminal handling for UniData",
   "license": "GPL-2.0-only",
   "systems": ["udt"],
-  "dependencies": ["mv-lang/cmd"]
+  "dependencies": ["mvx-lang/cmd"]
 }
 ```
 
@@ -38,8 +38,8 @@ infers nothing:
 
 ```json
 {
-  "name": "mv-lang/git",
-  "dependencies": ["mv-lang/cmd"],
+  "name": "mvx-lang/git",
+  "dependencies": ["mvx-lang/cmd"],
   "deploy": {
     "verbs": ["GIT"],
     "fallback": { "cmd": ["CMD.BP"] }

@@ -481,7 +481,7 @@ function accountPage(user, opts) {
        <label>Add a package — paste its <b>source URL</b> (a repository, or a link to its <code>mvpkg.json</code>)</label>
        <input type="text" name="source" placeholder="https://&hellip;/your-package   &middot;   or a link to its mvpkg.json" required>
        <label>Package name <span class="meta">(optional &mdash; read from mvpkg.json)</span></label>
-       <input type="text" name="package" placeholder="mv-lang/git">
+       <input type="text" name="package" placeholder="mvx-lang/git">
        <div style="margin-top:10px"><button class="primary" type="submit">Add package</button></div>
      </form>
      <p class="meta">The registry indexes your package and tracks its releases &mdash; it hosts nothing; downloads come from the source.</p>`, user);
