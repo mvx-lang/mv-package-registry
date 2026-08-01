@@ -21,9 +21,10 @@ UDT_RUN_CMD="$*"
 export UDT_RUN_CMD
 
 # --hostname unidata matches the captured install (belt and braces against any
-# host binding in the licence).  GITHUB_REF_NAME is forwarded so a build script
-# can stamp the version.
-exec docker run --rm --hostname unidata \
+# host binding in the licence).  --shm-size gives UniData's SysV shared memory
+# room — a build that runs udt (newacct/BASIC) needs it; harmless otherwise.
+# GITHUB_REF_NAME is forwarded so a build script can stamp the version.
+exec docker run --rm --hostname unidata --shm-size="${UDT_SHM_SIZE:-256m}" \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   -e GITHUB_REF_NAME="${GITHUB_REF_NAME:-}" \
   -e UDT_RUN_CMD \
