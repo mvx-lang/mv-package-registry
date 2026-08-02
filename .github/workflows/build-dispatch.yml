@@ -1,0 +1,55 @@
+# Central build — the registry dispatches this to build a package's UniData
+# binary for a source-only release, cross-repo.  Copyright (C) 2026 Gordon
+# Heydon.  GPL-2.0-only.
+#
+# The registry fires this via workflow_dispatch (github.dispatchWorkflow) when a
+# connected repo that opted in to `build` publishes a source release with native
+# code (udt-callc/*.c) but no binary asset.  It checks out the TARGET repo at the
+# tag, builds the binary in the licensed udt-builder container (self-hosted udt
+# runner), and uploads it to that release.  The release `edited` webhook then
+# re-indexes the package with the new binary — closing the loop with no polling.
+#
+# Cross-repo access needs a PACKAGE_TOKEN secret on THIS repo: a token that can
+# read the target repo and write its releases (a fine-grained PAT with
+# Contents: read/write on the package repos, or a classic `repo` PAT).  Set it
+# in Settings -> Secrets and variables -> Actions.  Run it by hand from the
+# Actions tab too (same inputs) to backfill a binary for any tag.
+name: build-dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'Package name, e.g. mvx-lang/git (artifact base = name with / -> _).'
+        required: true
+        type: string
+      repository:
+        description: 'Package repo to build (owner/name).'
+        required: true
+        type: string
+      ref:
+        description: 'Tag (or branch) of the release to build.'
+        required: true
+        type: string
+
+permissions:
+  contents: read          # cross-repo writes use PACKAGE_TOKEN, not GITHUB_TOKEN
+
+jobs:
+  udt-binary:
+    runs-on: [self-hosted, linux, udt]
+    steps:
+      - name: Check out the target package at the tag
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PACKAGE_TOKEN || github.token }}
+
+      - name: Build the UniData binary and attach it to the release
+        uses: mvx-lang/mv-package-registry/.github/actions/udt-build@main
+        with:
+          package: ${{ inputs.package }}
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PACKAGE_TOKEN || github.token }}

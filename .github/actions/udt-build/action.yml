@@ -32,6 +32,10 @@ inputs:
     description: GitHub token for the release upload.
     required: false
     default: ${{ github.token }}
+  ref:
+    description: 'Release tag to build + attach to (the artifact version). Defaults to this run''s ref name; set it for a cross-repo dispatch build of another tag.'
+    required: false
+    default: ${{ github.ref_name }}
 
 outputs:
   tarball:
@@ -50,6 +54,7 @@ runs:
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
+        GITHUB_REF_NAME: ${{ inputs.ref }}      # the version in the artifact name
       run: sh "$GITHUB_ACTION_PATH/build-release.sh" "$PACKAGE"
 
     - name: Publish the UniData binary asset
@@ -57,7 +62,7 @@ runs:
       with:
         token: ${{ inputs.token }}
         repository: ${{ inputs.repository }}
-        tag_name: ${{ github.ref_name }}
+        tag_name: ${{ inputs.ref }}
         files: |
           ${{ steps.build.outputs.tarball }}
           ${{ steps.build.outputs.tarball }}.sha256

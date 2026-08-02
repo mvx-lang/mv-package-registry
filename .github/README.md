@@ -92,6 +92,36 @@ That path is cross-repo, so set a **`PACKAGE_TOKEN`** secret (a token that can
 read the package repo and write its release); the tag-triggered `workflow_call`
 path above just uses the caller's `GITHUB_TOKEN`.
 
+## Central builds (registry-dispatched)
+
+A package need not run the `udt` build in its own CI. If its **source-only**
+release carries native code (`udt-callc/*.c`) and ships no binary asset, the
+registry can build one for it centrally — so a package author just tags a plain
+source release on public GitHub and users still get a prebuilt binary.
+
+The registry stays index-only — it doesn't run Docker. On the release webhook,
+if the connection **opted in** (the account page's *Build binary* toggle, or the
+*Build the UniData binary* checkbox on connect) and the source is native with no
+binary, it fires [`workflows/build-dispatch.yml`](workflows/build-dispatch.yml)
+via `workflow_dispatch` (inputs: `package`, `repository`, `ref`). That workflow
+runs on the self-hosted `udt` runner, builds the binary with `udt-build` at that
+tag, and uploads it to the release. Attaching the asset edits the release, whose
+`edited` webhook re-indexes the package — the binary is now installable, no
+polling. A `pkg.builds[version]` record dedupes repeat webhooks.
+
+Setup on this repo:
+
+- **`PACKAGE_TOKEN`** secret — reused for the cross-repo checkout + upload (as
+  above).
+- The registry's **`GITHUB_TOKEN`** needs *Actions: read and write* on this repo
+  to fire the dispatch (the same token that installs release webhooks).
+- Optional server env: `BUILD_DISPATCH_REPO` (default `mvx-lang/mv-package-registry`),
+  `BUILD_DISPATCH_WORKFLOW` (default `build-dispatch.yml`), `BUILD_DISPATCH_REF`
+  (default `main`).
+
+Run it by hand too from **Actions → build-dispatch → Run workflow** to backfill
+a binary for any tag.
+
 ## Registry config for publishers
 
 - **`MVPKG_REGISTRY`** — the registry base URL a client/CI points at (default
