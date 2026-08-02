@@ -123,6 +123,38 @@ test('release webhook + artifact resolution', async (t) => {
     assert.strictEqual(JSON.parse(other.body).selected, 'source', 'no matching binary -> source');
   });
 
+  // release channels: the default ("latest") version follows the STABLE series;
+  // a pre-release is recorded and installable by exact version, but never
+  // becomes the default that an unconstrained `MVPKG install` resolves.
+  const readMeta = () => JSON.parse(fs.readFileSync(path.join(regdir, 'demoscope', 'thing', 'meta.json'), 'utf8'));
+  const relOf = (ver, pre) => JSON.stringify({ action: 'published', release: {
+    tag_name: 'v' + ver, name: 'v' + ver, published_at: '2026-02-01T00:00:00Z',
+    tarball_url: 'https://example/src', html_url: 'https://github.com/demoscope/thing/releases/tag/v' + ver, prerelease: pre,
+    assets: [{ name: `demoscope_thing-${ver}-source.tar.gz`, browser_download_url: `https://example/dl/${ver}-source.tar.gz`, size: 100 }] } });
+
+  await t.test('a pre-release is recorded but does not become the default', async () => {
+    const raw = relOf('1.3.0-beta.1', true);
+    const r = await wh(raw, { 'X-GitHub-Event': 'release', 'X-Hub-Signature-256': sign(raw) });
+    assert.strictEqual(r.status, 200, logs.join(''));
+    const meta = readMeta();
+    assert.strictEqual(meta.version, '1.2.0', 'default stays on the stable series');
+    assert.ok(meta.versions.some(v => v.version === '1.3.0-beta.1'), 'beta recorded in history');
+    const def = JSON.parse((await req('GET', '/package/demoscope/thing')).body);
+    assert.strictEqual(def.version, '1.2.0', 'unconstrained resolution ignores the beta');
+    const beta = JSON.parse((await req('GET', '/package/demoscope/thing?version=1.3.0-beta.1')).body);
+    assert.strictEqual(beta.version, '1.3.0-beta.1', 'the beta is installable by exact version');
+    assert.ok(beta.tarball.includes('1.3.0-beta.1'), 'resolves the beta artifact');
+  });
+
+  await t.test('a later stable release promotes the default forward', async () => {
+    const raw = relOf('1.3.0', false);
+    const r = await wh(raw, { 'X-GitHub-Event': 'release', 'X-Hub-Signature-256': sign(raw) });
+    assert.strictEqual(r.status, 200, logs.join(''));
+    assert.strictEqual(readMeta().version, '1.3.0', 'stable release becomes the new default');
+    const def = JSON.parse((await req('GET', '/package/demoscope/thing')).body);
+    assert.strictEqual(def.version, '1.3.0');
+  });
+
   await t.test('Refresh catches up a no-webhook source (owner only)', async () => {
     // register alice (owns the seeded packages) and refresh the manifest-tracked one
     const alice = client(port, host);

@@ -32,6 +32,7 @@ const https = require('https');
 const querystring = require('querystring');
 const webauthn = require('./lib/webauthn');
 const providers = require('./lib/providers');
+const semver = require('./lib/semver');
 
 // Public base URL (for webhook URLs shown to the user); reuse the WebAuthn
 // origin in production, derive nothing useful in dev.
@@ -536,7 +537,11 @@ function mergeVersion(pkg, v) {
   if (!v || !v.version) return;
   pkg.versions = (pkg.versions || []).filter(x => x.version !== v.version);
   pkg.versions.unshift({ version: v.version, tag: v.tag || null, at: v.at || null, html: v.html || null });
-  pkg.versions.sort((a, b) => (b.at ? Date.parse(b.at) || 0 : 0) - (a.at ? Date.parse(a.at) || 0 : 0));
+  // Newest-first by semver precedence (pre-releases rank below their release),
+  // which is the order the client walks to pick the newest version satisfying a
+  // dependency constraint; fall back to date when versions compare equal.
+  pkg.versions.sort((a, b) => semver.cmp(b.version, a.version) ||
+    ((b.at ? Date.parse(b.at) || 0 : 0) - (a.at ? Date.parse(a.at) || 0 : 0)));
   if (pkg.versions.length > 50) pkg.versions.length = 50;
 }
 
@@ -570,15 +575,23 @@ function indexRelease(pkg, rel) {
   const version = rel.version;
   const arts = artifactsFromRelease(pkg, rel);
   if (!arts.length) return 0;                          // nothing recognisable in this release
+  const promote = semver.shouldPromote(pkg.version, version); // default only if stable-newest
   const key = a => a.map(x => x.tarball).sort().join('|');
-  const unchanged = pkg.version === version && key(pkg.artifacts || []) === key(arts);
-  if (unchanged) return 0;                             // already indexed exactly this set
-  pkg.version = version;
-  pkg.artifacts = arts;
-  const src = arts.find(a => a.kind === 'source');
-  pkg.tarball = src ? src.tarball : (arts[0] ? arts[0].tarball : '');
-  pkg.systems = [...new Set([...(pkg.systems || []), ...arts.filter(a => a.kind === 'binary').map(a => a.system)])];
+  const known = (pkg.versions || []).some(x => x.version === version);
+  const artsSame = pkg.version === version && key(pkg.artifacts || []) === key(arts);
+  // Idempotent: nothing new to record and no promotion (or the promoted set is
+  // already current) means this webhook/refresh is a no-op.
+  if (known && (!promote || artsSame)) return 0;
+  if (promote) {
+    pkg.version = version;
+    pkg.artifacts = arts;
+    const src = arts.find(a => a.kind === 'source');
+    pkg.tarball = src ? src.tarball : (arts[0] ? arts[0].tarball : '');
+    pkg.systems = [...new Set([...(pkg.systems || []), ...arts.filter(a => a.kind === 'binary').map(a => a.system)])];
+  }
   pkg.updated = Date.now();
+  // tracking.latest records the newest release SEEN (any channel), which is what
+  // drives push-tracking freshness — distinct from the stable default above.
   if (pkg.tracking) pkg.tracking.latest = { version, tag: rel.tag, at: rel.at, html: rel.html, seenAt: Date.now() };
   mergeVersion(pkg, { version, tag: rel.tag, at: rel.at, html: rel.html });
   savePackage(pkg);
