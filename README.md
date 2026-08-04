@@ -123,14 +123,6 @@ UniData packages that ship a native bridge compile it in the `builder/`
 container inside their release workflow — see [`builder/README.md`](builder/README.md)
 and, for worked examples, `mv_git`'s and `udt_curses`'s `release` workflows.
 
-**Central builds.**  A package need not build the binary itself.  If a connected
-GitHub source publishes a **source-only** release with native code and no binary
-asset, and the owner opted in (the *Build binary* toggle on the account page),
-the registry dispatches the build on the self-hosted runner and the binary is
-attached to that release — so tagging a plain source release is enough.  The
-registry never runs Docker; it fires the build workflow via the GitHub API and
-re-indexes when the asset lands.  See [`.github/README.md`](.github/README.md).
-
 ## Run / deploy
 
 ```sh

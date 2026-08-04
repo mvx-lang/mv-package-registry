@@ -73,18 +73,6 @@ const ADMIN_TOKEN = process.env.MVPKG_PUBLISH_TOKEN || '';   // optional admin p
 // without anyone having to set a password on their behalf.
 const ADMIN_USERS = (process.env.MVPKG_ADMIN_USERS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const isAdminUser = u => !!u && (u.isAdmin === true || ADMIN_USERS.includes(String(u.username).toLowerCase()));
-
-// Central build: systems the registry can build (via the self-hosted runner),
-// and where the dispatched build workflow lives.  A connection opts in per
-// system (meta.tracking.build); a source release with native code but no binary
-// for an opted-in system dispatches BUILD_DISPATCH_WORKFLOW in BUILD_DISPATCH_REPO.
-const BUILD_SYSTEMS = ['udt'];
-// The dispatched build workflow lives in this repo and runs on the self-hosted
-// runner; it checks out the package repo at the tag, builds the binary, and
-// uploads it to that release — whose `edited` webhook then re-indexes it.
-const BUILD_DISPATCH_REPO = process.env.BUILD_DISPATCH_REPO || 'mvx-lang/mv-package-registry';
-const BUILD_DISPATCH_WORKFLOW = process.env.BUILD_DISPATCH_WORKFLOW || 'build-dispatch.yml';
-const BUILD_DISPATCH_REF = process.env.BUILD_DISPATCH_REF || 'main';
 fs.mkdirSync(USERDIR, { recursive: true });
 
 // Server secret for signing session cookies — generated once, persisted.
@@ -484,19 +472,11 @@ function accountPage(user, opts) {
     ? mine.map(p => {
         const t = p.tracking || {};
         const track = t.hookId ? 'auto-updating on release &#10003;' : (t.provider ? 'no webhook — use Refresh to catch up' : 'not tracked');
-        const prov = providers.byName(t.provider);
-        const canBuild = !!(prov && prov.buildable);
-        const buildOn = buildEnabledSystems(p).length > 0;
-        const buildLine = canBuild
-          ? `<br><span class="meta">UniData build: ${buildOn ? 'on &#10003; <span class="meta">(source releases built automatically)</span>' : 'off'}</span>` : '';
-        const buildForm = canBuild
-          ? `<form method="post" action="/packages/build" style="margin:0"><input type="hidden" name="name" value="${esc(p.name)}"><input type="hidden" name="build" value="${buildOn ? 'off' : 'udt'}"><button style="padding:4px 12px" title="Build the UniData binary from source-only releases">${buildOn ? 'Disable build' : 'Build binary'}</button></form>` : '';
         return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div>
           <b><a href="/p/${esc(p.name)}">${esc(p.name)}</a></b> <span class="v">${esc(p.version || '—')}</span><br>
           <span class="meta">source: ${p.source ? '<a href="' + esc(p.source) + '">' + esc(p.source) + '</a>' : 'unknown'}</span><br>
-          <span class="meta">releases: ${esc(track)}</span>${buildLine}</div>
+          <span class="meta">releases: ${esc(track)}</span></div>
           <div style="display:flex;gap:6px">
-          ${buildForm}
           <form method="post" action="/packages/refresh" style="margin:0"><input type="hidden" name="name" value="${esc(p.name)}"><button style="padding:4px 12px" title="Check the source for new releases now">Refresh</button></form>
           <form method="post" action="/packages/remove" style="margin:0" onsubmit="return confirm('Remove ${esc(p.name)} from the index?')"><input type="hidden" name="name" value="${esc(p.name)}"><button style="padding:4px 12px">Remove</button></form></div></div></div>`;
       }).join('')
@@ -523,18 +503,16 @@ function accountPage(user, opts) {
     : '';
   const addErr = opts.addError ? `<div class="msg err">${esc(opts.addError)}</div>` : '';
   const refMsg = opts.refreshed ? `<div class="msg ok">Refreshed <code>${esc(opts.refreshed)}</code> from its source.</div>` : '';
-  const bldMsg = opts.built ? `<div class="msg ok">Updated the UniData build setting for <code>${esc(opts.built)}</code>.</div>` : '';
   return page('Account — mv_package',
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
      <h3 style="margin-top:24px">Passkeys</h3>${pks}
      <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
-     <h3 style="margin-top:24px">Your packages</h3>${addMsg}${addErr}${refMsg}${bldMsg}${pkgs}
+     <h3 style="margin-top:24px">Your packages</h3>${addMsg}${addErr}${refMsg}${pkgs}
      <form method="post" action="/packages" style="margin-top:14px">
        <label>Add a package — paste its <b>source URL</b> (a repository, or a link to its <code>mvpkg.json</code>)</label>
        <input type="text" name="source" placeholder="https://&hellip;/your-package   &middot;   or a link to its mvpkg.json" required>
        <label>Package name <span class="meta">(optional &mdash; read from mvpkg.json)</span></label>
        <input type="text" name="package" placeholder="mvx-lang/git">
-       <label style="display:block;margin-top:8px"><input type="checkbox" name="build" value="udt"> Build the UniData binary from source-only releases <span class="meta">(GitHub sources; needs a self-hosted builder)</span></label>
        <div style="margin-top:10px"><button class="primary" type="submit">Add package</button></div>
      </form>
      <p class="meta">The registry indexes your package and tracks its releases &mdash; it hosts nothing; downloads come from the source.</p>
@@ -620,78 +598,6 @@ function indexRelease(pkg, rel) {
   return arts.length;
 }
 
-// ---- central build (dispatch) ---------------------------------------------
-// The systems a connection has opted in to central-build for (intersection with
-// what the registry can build).  meta.tracking.build may be an array, true
-// (= all BUILD_SYSTEMS), or a comma/space list.
-function buildEnabledSystems(pkg) {
-  const b = pkg.tracking && pkg.tracking.build;
-  if (!b) return [];
-  const list = Array.isArray(b) ? b : (b === true ? BUILD_SYSTEMS : String(b).split(/[\s,]+/));
-  return list.map(s => String(s).trim().toLowerCase()).filter(s => BUILD_SYSTEMS.includes(s));
-}
-
-// Normalise a build opt-in from a form/API value to the systems we can build
-// (array; [] = explicitly off).  Accepts an array, a comma/space list, or a
-// truthy checkbox value ("on"/"1"/"udt"...).  undefined means "leave unchanged".
-function normalizeBuild(spec) {
-  if (spec === undefined || spec === null) return undefined;
-  const raw = (Array.isArray(spec) ? spec : String(spec).split(/[\s,]+/))
-    .map(s => String(s).trim().toLowerCase()).filter(Boolean);
-  if (raw.some(s => s === 'off' || s === 'none' || s === 'false' || s === '0')) return [];
-  // a bare truthy checkbox ("on"/"true"/"1"/"yes") enables every buildable system
-  if (raw.length && raw.every(s => ['on', 'true', '1', 'yes'].includes(s))) return [...BUILD_SYSTEMS];
-  return [...new Set(raw.filter(s => BUILD_SYSTEMS.includes(s)))];
-}
-
-// Does the release already carry a native binary asset for `system`?  Asset
-// key: <base>-<ver>-<system>-<os>-<arch>-<endian>.tar.gz (base = name '/'->'_').
-function releaseHasBinary(pkg, release, system) {
-  const pre = `${pkg.name.replace(/\//g, '_')}-${release.version}-${system}-`;
-  return (release.assets || []).some(a => a.name && a.name.startsWith(pre) && a.name.endsWith('.tar.gz'));
-}
-
-// After indexing a release, dispatch a central build for each opted-in system
-// that (a) has no binary asset yet and (b) hasn't already been dispatched for
-// this version, when the source actually carries native code.  Fire-and-forget;
-// the build workflow uploads the binary to the release, whose `edited` webhook
-// then re-indexes the package with it.
-function maybeDispatchBuild(pkg, release, cb) {
-  cb = cb || (() => {});
-  const prov = providers.byName(pkg.tracking && pkg.tracking.provider);
-  if (!prov || !prov.buildable || !prov.dispatchBuild) return cb();
-  const rec = (pkg.builds && pkg.builds[release.version]) || null;
-  const done = (rec && rec.systems) || [];
-  const want = buildEnabledSystems(pkg)
-    .filter(s => !releaseHasBinary(pkg, release, s) && !done.includes(s));
-  if (!want.length) return cb();
-  prov.hasNativeCode(pkg.tracking.ref, release.tag || release.version, (e, native) => {
-    if (e || !native) return cb(e);
-    let remaining = want.length;
-    want.forEach(system => {
-      // inputs match build-dispatch.yml's workflow_dispatch (package/repository/ref)
-      prov.dispatchBuild(
-        { repo: BUILD_DISPATCH_REPO, workflow: BUILD_DISPATCH_WORKFLOW, ref: BUILD_DISPATCH_REF },
-        { package: pkg.name, repository: pkg.tracking.ref.repo, ref: release.tag || release.version },
-        (de) => {
-          if (!de) {
-            const fresh = loadPackage(pkg.name) || pkg;
-            fresh.builds = fresh.builds || {};
-            const r = fresh.builds[release.version] || { systems: [], at: Date.now() };
-            r.systems = [...new Set([...(r.systems || []), system])];
-            r.state = 'dispatched'; r.at = Date.now();
-            fresh.builds[release.version] = r;
-            savePackage(fresh);
-            console.log(`build: dispatched ${pkg.name} ${release.version} (${system})`);
-          } else {
-            console.log(`build: dispatch failed ${pkg.name} ${release.version} (${system}): ${de.message}`);
-          }
-          if (--remaining === 0) cb();
-        });
-    });
-  });
-}
-
 // Index a "dev" version — the source of the default branch — for a package
 // with no release yet.  A single external source artifact (the branch archive).
 function indexDev(pkg, dev) {
@@ -708,8 +614,7 @@ function indexDev(pkg, dev) {
 // mvpkg.json for the name + metadata, record the source, install push tracking
 // where supported (a webhook), and index the current release.
 // cb(err, { name, installed, note }).
-function addPackage(user, source, pkgOverride, build, cb) {
-  if (typeof build === 'function') { cb = build; build = undefined; }   // 4-arg back-compat
+function addPackage(user, source, pkgOverride, cb) {
   const resolved = providers.resolve(String(source || '').trim());
   if (!resolved) return cb(new Error('Unrecognised source — paste a repository URL or a link to an mvpkg.json.'));
   const { provider, ref } = resolved;
@@ -739,8 +644,6 @@ function addPackage(user, source, pkgOverride, build, cb) {
     meta.tracking = meta.tracking || { id: crypto.randomBytes(6).toString('hex'), secret: crypto.randomBytes(24).toString('base64url'), hookId: null, latest: null };
     meta.tracking.provider = provider.name;
     meta.tracking.ref = ref;
-    const nb = normalizeBuild(build);
-    if (nb !== undefined) meta.tracking.build = nb;
     meta.updated = Date.now();
     savePackage(meta);
 
@@ -897,9 +800,6 @@ const server = http.createServer((req, res) => {
           const fresh = loadPackage(pkg.name);
           const n = fresh ? indexRelease(fresh, v.release) : 0;
           console.log(`webhook: ${pkg.name} <- ${prov.name} release ${v.release.tag} (indexed ${n})`);
-          // Central build: if opted in and the source is native with no binary
-          // asset yet, dispatch the build (fire-and-forget; it re-indexes later).
-          if (fresh) maybeDispatchBuild(loadPackage(pkg.name) || fresh, v.release);
           // A release is exactly when the manifest may have changed (description,
           // deps, README) — refresh it here (push-driven), so we never poll.
           refreshMeta(pkg, () => {});                     // fire-and-forget
@@ -947,7 +847,7 @@ const server = http.createServer((req, res) => {
       if (u.pathname === '/packages') {
         const actor = user ? { user, viaToken: false } : tokenActor(req);
         if (!actor) return tokenAttempt(req) ? sendJSON(res, 401, { error: 'bad or missing token' }) : redirect(res, '/login');
-        addPackage(actor.user, form.source, form.package, form.build, (err, r) => {
+        addPackage(actor.user, form.source, form.package, (err, r) => {
           if (actor.viaToken) return err ? sendJSON(res, 400, { error: err.message }) : sendJSON(res, 200, r);
           if (err) return sendHTML(res, 400, accountPage(actor.user, { addError: err.message }));
           return sendHTML(res, 200, accountPage(loadUser(actor.user.username), { added: r }));
@@ -985,25 +885,6 @@ const server = http.createServer((req, res) => {
           if (actor.viaToken) { const f = loadPackage(pkg.name); return sendJSON(res, 200, { name: pkg.name, version: f && f.version }); }
           return sendHTML(res, 200, accountPage(loadUser(actor.user.username), { refreshed: pkg.name }));
         });
-      }
-      // Toggle central-build opt-in for a package (owner/admin, or their token).
-      // body: name, build (systems list, or "off"/"on").  Only meaningful for a
-      // buildable (GitHub) source with a webhook.
-      if (u.pathname === '/packages/build') {
-        const actor = user ? { user, viaToken: false } : tokenActor(req);
-        if (!actor) return tokenAttempt(req) ? sendJSON(res, 401, { error: 'bad or missing token' }) : redirect(res, '/login');
-        const pkg = loadPackage(String(form.name || '').trim());
-        const allowed = pkg && (pkg.owner === actor.user.username || isAdminUser(actor.user));
-        if (!allowed) {
-          if (actor.viaToken) return sendJSON(res, pkg ? 403 : 404, { error: pkg ? 'not owner' : 'no such package' });
-          return redirect(res, '/account');
-        }
-        const nb = normalizeBuild(form.build === undefined ? 'off' : form.build);
-        pkg.tracking = pkg.tracking || {};
-        pkg.tracking.build = nb;
-        savePackage(pkg);
-        if (actor.viaToken) return sendJSON(res, 200, { name: pkg.name, build: nb });
-        return sendHTML(res, 200, accountPage(loadUser(actor.user.username), { built: pkg.name }));
       }
       if (u.pathname === '/register') return handleRegister(req, res, form);
       if (u.pathname === '/login') return handleLogin(req, res, form);
