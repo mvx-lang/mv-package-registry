@@ -6,7 +6,7 @@
 # `udt-run` wrapper on PATH (from the setup-udt action).  The udt-build action
 # carries this script so a caller in another repo needn't check the registry out.
 #
-#   VERSION=<version>  sh build-release.sh <package-name>   (else GITHUB_REF_NAME)
+#   GITHUB_REF_NAME=<version>  sh build-release.sh <package-name>
 #
 # Contract: the package repo (the current directory) provides `build-udt.sh`,
 # which — run INSIDE the container at the repo root — stages its release tree
@@ -20,11 +20,8 @@
 # `tarball=` / `checksum=` step outputs.
 set -eu
 
-PKG="${1:?usage: VERSION=<ver> build-release.sh <package-name>  (e.g. mvx-lang/git)}"
-# The artifact version: VERSION when set (a cross-repo dispatch builds a tag that
-# is NOT this run's ref), else the run's own tag.  GITHUB_* is a reserved env
-# prefix an action step's `env:` cannot override, so the caller passes VERSION.
-VER="${VERSION:-${GITHUB_REF_NAME:?set VERSION (or GITHUB_REF_NAME) to the version tag}}"
+PKG="${1:?usage: GITHUB_REF_NAME=<ver> build-release.sh <package-name>  (e.g. mvx-lang/git)}"
+VER="${GITHUB_REF_NAME:?set GITHUB_REF_NAME to the version tag}"
 
 command -v udt-run >/dev/null 2>&1 || {
   echo "::error::udt-run not on PATH — run the setup-udt action first" >&2; exit 1; }

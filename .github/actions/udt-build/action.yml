@@ -54,7 +54,7 @@ runs:
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
-        VERSION: ${{ inputs.ref }}      # the version in the artifact name (GITHUB_* is reserved)
+        GITHUB_REF_NAME: ${{ inputs.ref }}      # the version in the artifact name
       run: sh "$GITHUB_ACTION_PATH/build-release.sh" "$PACKAGE"
 
     - name: Publish the UniData binary asset
