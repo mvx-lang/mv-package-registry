@@ -107,6 +107,17 @@ function loadPackage(name) {
   try { return JSON.parse(fs.readFileSync(path.join(REGDIR, name, 'meta.json'), 'utf8')); }
   catch { return null; }
 }
+// A virtual name is satisfied by any package whose `provides` lists it, so a
+// rename resolves transparently: a package udt_curses that is ported and
+// renamed mvx-lang/cursors declares "provides": ["udt_curses"], and a request
+// for the old name serves cursors — the client installs it and the dependency
+// on udt_curses is met.
+function findProvider(name) {
+  for (const p of loadPackages()) {
+    if (String(p.provides || '').trim().split(/\s+/).includes(name)) return p;
+  }
+  return null;
+}
 function savePackage(meta) {
   fs.mkdirSync(path.join(REGDIR, meta.name), { recursive: true });
   fs.writeFileSync(path.join(REGDIR, meta.name, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
@@ -626,6 +637,7 @@ function addPackage(user, source, pkgOverride, cb) {
       if (!name && j.name) name = String(j.name);
       man = { description: j.description || '', license: j.license || '',
         dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
+        provides: Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || ''),
         systems: Array.isArray(j.systems) ? j.systems : [] };
     } catch {} }
     if (!name || !okName(name))
@@ -640,6 +652,7 @@ function addPackage(user, source, pkgOverride, cb) {
     if (man.description) meta.description = man.description;
     if (man.license) meta.license = man.license;
     if (man.dependencies) meta.dependencies = man.dependencies;
+    if (man.provides !== undefined) meta.provides = man.provides;
     if (man.systems && man.systems.length) meta.systems = [...new Set([...(meta.systems || []), ...man.systems])];
     meta.tracking = meta.tracking || { id: crypto.randomBytes(6).toString('hex'), secret: crypto.randomBytes(24).toString('base64url'), hookId: null, latest: null };
     meta.tracking.provider = provider.name;
@@ -733,6 +746,7 @@ function selectArtifact(meta, system, os, arch, endian) {
     license: meta.license || '', sourceIncluded,
     systems: meta.systems || [], owner: meta.owner, selected,
     versions: (meta.versions || []).map(v => v.version).join(' '),
+    provides: meta.provides || '',
   };
 }
 
@@ -755,6 +769,7 @@ function resolveExactVersion(meta, version, system, os, arch, endian) {
     license: meta.license || '', sourceIncluded: true,
     systems: meta.systems || [], owner: meta.owner, selected: 'source',
     versions: (meta.versions || []).map(x => x.version).join(' '),
+    provides: meta.provides || '',
   };
 }
 
@@ -948,7 +963,7 @@ const server = http.createServer((req, res) => {
   if (parts[0] === 'package' && parts[1]) {
     const nm = parts.slice(1).join('/');               // scoped: /package/<scope>/<name>
     if (!okName(nm)) return sendJSON(res, 404, { error: 'not found' });
-    const meta = loadPackage(nm);
+    const meta = loadPackage(nm) || findProvider(nm);  // real package, else a provider
     if (!meta) return sendJSON(res, 404, { error: 'not found' });
     // ?version=<exact> -> that version (for a client resolving a constraint);
     // else the latest.  Both carry the `versions` list and ?system=&arch=
@@ -993,6 +1008,8 @@ function refreshMeta(pkg, cb) {
       if (j.license && j.license !== fresh.license) { fresh.license = j.license; changed = true; }
       const deps = Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || '');
       if (deps && deps !== fresh.dependencies) { fresh.dependencies = deps; changed = true; }
+      const provs = Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || '');
+      if (provs !== (fresh.provides || '')) { fresh.provides = provs; changed = true; }
       if (Array.isArray(j.systems) && j.systems.length) {
         const sys = [...new Set([...(fresh.systems || []), ...j.systems])];   // additive (binaries also add systems)
         if (sys.length !== (fresh.systems || []).length) { fresh.systems = sys; changed = true; }
