@@ -22,20 +22,33 @@ needed), compiles BASIC, and runs the native build toolchain
    ./capture-install.sh rocky@your-unidata-host        # writes ud83.tar.gz
    ```
 
-   Pulls `$UDTHOME` (default `/usr/ud83`) plus any from-source libgit2 —
-   the runtime `/usr/local/lib64/libgit2.so*` **and** its headers
-   (`/usr/local/include/git2*`), so the image can *build* `udt-git` (mv_git's
-   UniData binary) from source, not just run a prebuilt bridge.
+   Pulls `$UDTHOME` (default `/usr/ud83`) — just the UniData install and its
+   InterCall headers/`libuvic.a`. libgit2 is **not** captured any more: the image
+   installs EPEL's `libgit2_1.7-devel` (see the Dockerfile), so `udt-git` links
+   `libgit2.so.1.7` and end users get the runtime with `dnf install libgit2_1.7`.
 
-2. **Build**:
+   Then park the capture at the runner's stable path so the CI action can find it
+   without it ever entering git:
 
    ```sh
-   docker build -t udt-builder:8.3.2 .
+   sudo install -D -m600 ud83.tar.gz /opt/udt-builder/ud83.tar.gz
+   # or export UDT_UD83_TARBALL=/your/path in the runner's environment
    ```
 
-   Rocky 8 base + the build/runtime deps (gcc, ncurses-devel, glib2, gdbm,
-   pam, unixODBC, libnsl, `en_US.UTF-8`) + the captured install, with
-   `/usr/ud83/bin` on the linker path and UniData's own start-up.
+2. **Building the image is now the worker's job.** The `setup-udt` action
+   (re)builds `udt-builder:<tag>` from **this checkout's Dockerfile** at the start
+   of every udt job, staging the parked `ud83.tar.gz` into the context — so a
+   Dockerfile change (deps, the libgit2 version) is picked up automatically and
+   Docker's layer cache keeps a no-change run near-instant. You don't hand-build
+   it. To build once locally for a quick test you still can:
+
+   ```sh
+   cp /opt/udt-builder/ud83.tar.gz . && docker build -t udt-builder:8.3.2 .
+   ```
+
+   Rocky 8 base + the build/runtime deps (gcc, ncurses-devel, glib2, gdbm, pam,
+   unixODBC, libnsl, EPEL `libgit2_1.7-devel`, `en_US.UTF-8`) + the captured
+   install, with `/usr/ud83/bin` on the linker path and UniData's own start-up.
 
 ## Use it
 

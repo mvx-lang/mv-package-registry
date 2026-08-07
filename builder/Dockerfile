@@ -20,12 +20,11 @@ RUN dnf -y install epel-release \
 # match the source install's group ownership
 RUN groupadd -g 1001 unidata || true
 
-# the captured install: /usr/ud83 + the from-source libgit2
+# the captured UniData install (/usr/ud83); libgit2 comes from EPEL above
 COPY ud83.tar.gz /tmp/ud83.tar.gz
 RUN tar xzf /tmp/ud83.tar.gz -C / \
     && rm -f /tmp/ud83.tar.gz \
-    && ln -sf libgit2.so.1.9.6 /usr/local/lib64/libgit2.so \
-    && printf '/lib64\n/usr/lib64\n/usr/local/lib64\n/usr/ud83/bin\n' > /etc/ld.so.conf.d/UniData.conf \
+    && printf '/lib64\n/usr/lib64\n/usr/ud83/bin\n' > /etc/ld.so.conf.d/UniData.conf \
     && ldconfig
 
 # UniData network daemon port
@@ -34,8 +33,7 @@ RUN printf 'udt_os\t1382/tcp\nudt_os\t1382/udp\n' >> /etc/services
 # LIBGIT2_LIBS makes build-udt.sh link the EPEL libgit2_1.7 by its exact soname
 # (it ships no unversioned libgit2.so or pkgconfig; headers are the standard
 # /usr/include).  The binary then needs only libgit2.so.1.7 at the user's site,
-# which they get from `dnf install libgit2_1.7`.  Overrides the from-source
-# libgit2 1.9.6 still present under /usr/local (unused for the git build).
+# which they get from `dnf install libgit2_1.7`.
 ENV UDTHOME=/usr/ud83 \
     UDTBIN=/usr/ud83/bin \
     PATH=/usr/ud83/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

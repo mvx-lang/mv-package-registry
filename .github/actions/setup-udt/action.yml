@@ -2,10 +2,13 @@
 # runner.  Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
 #
 # The UniData analogue of setup-mvx / the dconsole action: it makes the tool
-# available for later steps.  But UniData is licensed and cannot be distributed,
-# so nothing is downloaded — instead this verifies the `udt-builder` image is
-# already on the (self-hosted) runner and puts a `udt-run` wrapper on PATH, so
-# subsequent steps run any command inside the licensed container:
+# available for later steps.  UniData is licensed and cannot be distributed, so
+# nothing is downloaded — but the image is now (re)BUILT on the (self-hosted)
+# runner from the builder/ context in THIS checkout, so a Dockerfile change (e.g.
+# the libgit2 version) is picked up automatically without a hand-rebuild.  Docker
+# layer caching keeps a no-change run near-instant.  The one licensed piece,
+# ud83.tar.gz (the captured install), stays on the runner and is never in git —
+# provisioned once per runner (builder/capture-install.sh) at a stable path.
 #
 #   runs-on: [self-hosted, linux, udt]
 #   steps:
@@ -14,13 +17,20 @@
 #     - run: udt-run 'BASIC BP MYPROG'
 #     - run: udt-run sh build-udt.sh /pkg/dist
 name: Setup UniData builder
-description: Verify the licensed udt-builder image on a self-hosted runner and put a `udt-run` wrapper on PATH for later steps.
+description: Build the licensed udt-builder image from the current Dockerfile on a self-hosted runner and put a `udt-run` wrapper on PATH.
 
 inputs:
   image:
-    description: The udt-builder image on the runner.
+    description: The udt-builder image tag to build/use.
     required: false
     default: udt-builder:8.3.2
+  ud83:
+    description: >-
+      Path on the runner to the licensed captured install (ud83.tar.gz), kept off
+      git and provisioned once per runner.  Defaults to $UDT_UD83_TARBALL, else
+      /opt/udt-builder/ud83.tar.gz.
+    required: false
+    default: ''
 
 outputs:
   image:
@@ -34,11 +44,27 @@ runs:
       shell: bash
       env:
         UDT_BUILDER_IMAGE: ${{ inputs.image }}
+        UDT_UD83_IN: ${{ inputs.ud83 }}
       run: |
         set -euo pipefail
         command -v docker >/dev/null 2>&1 || { echo "::error::docker not found on this runner"; exit 1; }
-        docker image inspect "$UDT_BUILDER_IMAGE" >/dev/null 2>&1 || {
-          echo "::error::udt-builder image '$UDT_BUILDER_IMAGE' not on this runner (see mv-package-registry/builder/README.md)"; exit 1; }
+
+        # The builder/ context lives in the registry repo (this action's repo),
+        # three levels up from .github/actions/setup-udt.
+        BUILDER="$(cd "$GITHUB_ACTION_PATH/../../../builder" && pwd)"
+        [ -f "$BUILDER/Dockerfile" ] || { echo "::error::builder context not found at $BUILDER"; exit 1; }
+
+        # The licensed capture (never committed): input, else runner env, else default.
+        UD83="${UDT_UD83_IN:-${UDT_UD83_TARBALL:-/opt/udt-builder/ud83.tar.gz}}"
+        [ -f "$UD83" ] || {
+          echo "::error::licensed capture not found at '$UD83' — provision it once on this runner with builder/capture-install.sh (see builder/README.md), or set inputs.ud83 / \$UDT_UD83_TARBALL"; exit 1; }
+
+        # Build the image from the CURRENT Dockerfile; layer cache makes an
+        # unchanged run cheap, and any Dockerfile change (libgit2 version, deps)
+        # is picked up here — no manual rebuild.
+        cp -f "$UD83" "$BUILDER/ud83.tar.gz"
+        docker build -t "$UDT_BUILDER_IMAGE" "$BUILDER"
+
         # Put `udt-run` on PATH and pin the image for the rest of the job.
         BIN="$RUNNER_TEMP/udt-bin"
         mkdir -p "$BIN"
@@ -46,4 +72,4 @@ runs:
         echo "$BIN" >> "$GITHUB_PATH"
         echo "UDT_BUILDER_IMAGE=$UDT_BUILDER_IMAGE" >> "$GITHUB_ENV"
         echo "image=$UDT_BUILDER_IMAGE" >> "$GITHUB_OUTPUT"
-        echo "setup-udt: udt-run ready (image $UDT_BUILDER_IMAGE)"
+        echo "setup-udt: built + ready ($UDT_BUILDER_IMAGE from $BUILDER)"
