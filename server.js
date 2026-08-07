@@ -33,6 +33,7 @@ const querystring = require('querystring');
 const webauthn = require('./lib/webauthn');
 const providers = require('./lib/providers');
 const semver = require('./lib/semver');
+const ghapp = require('./lib/ghapp');
 
 // Public base URL (for webhook URLs shown to the user); reuse the WebAuthn
 // origin in production, derive nothing useful in dev.
@@ -127,6 +128,50 @@ function savePackage(meta) {
 function findPackageByHook(id) {
   for (const p of loadPackages()) if (p.tracking && p.tracking.id === id) return p;
   return null;
+}
+// The GitHub App delivers one webhook for every installed repo, so a `release`
+// event is matched to its package by repo (owner/name), not a per-package id.
+function findPackageByRepo(repo) {
+  const r = String(repo || '').toLowerCase();
+  for (const p of loadPackages())
+    if (p.tracking && p.tracking.provider === 'github' && p.tracking.ref &&
+        String(p.tracking.ref.repo || '').toLowerCase() === r) return p;
+  return null;
+}
+
+// ---- GitHub App config (a single, registry-wide connection) ---------------
+// Created once via the App-manifest flow and stored in _auth (skipped as a
+// package — no meta.json).  Holds the App id + private key (JWT), the single
+// webhook secret, and which accounts have installed it (learned from
+// `installation` events, refreshable via /gh/app/sync).
+const GHAPP_FILE = path.join(AUTHDIR, 'github-app.json');
+function loadGhApp() { try { return JSON.parse(fs.readFileSync(GHAPP_FILE, 'utf8')); } catch { return null; } }
+function saveGhApp(cfg) { fs.writeFileSync(GHAPP_FILE, JSON.stringify(cfg, null, 2) + '\n'); }
+function ghAppInstallUrl(cfg) { return cfg && cfg.htmlUrl ? cfg.htmlUrl + '/installations/new' : null; }
+// Does the connected App cover this repo (so its releases reach our webhook)?
+function ghAppCoversRepo(cfg, repo) {
+  if (!cfg || !cfg.installs) return false;
+  const owner = String(repo).split('/')[0].toLowerCase();
+  const inst = cfg.installs[owner];
+  if (!inst) return false;
+  return inst.selection === 'all' || !!(inst.repos && inst.repos[String(repo).toLowerCase()]);
+}
+// Fold an `installation` / `installation_repositories` webhook (or a /sync
+// result) into the App's coverage map, keyed by owner login (lowercased).
+function ghAppApplyInstall(cfg, ev) {
+  if (!ev || !ev.account) return;
+  const owner = String(ev.account).toLowerCase();
+  cfg.installs = cfg.installs || {};
+  if (ev.action === 'deleted') { delete cfg.installs[owner]; saveGhApp(cfg); return; }
+  const inst = cfg.installs[owner] || { installationId: ev.installationId, selection: ev.selection || 'selected', repos: {} };
+  if (ev.installationId) inst.installationId = ev.installationId;
+  if (ev.selection) inst.selection = ev.selection;
+  inst.repos = inst.repos || {};
+  (ev.repos || []).forEach(r => { inst.repos[String(r).toLowerCase()] = true; });
+  (ev.removed || []).forEach(r => { delete inst.repos[String(r).toLowerCase()]; });
+  inst.updated = Date.now();
+  cfg.installs[owner] = inst;
+  saveGhApp(cfg);
 }
 
 // ---- users -----------------------------------------------------------
@@ -533,7 +578,49 @@ function accountPage(user, opts) {
      <form method="post" action="/account/tokens" style="margin-top:14px">
        <input type="text" name="name" placeholder="token name (e.g. ci)" style="max-width:280px">
        <button class="primary" type="submit">Create token</button>
-     </form>`, user);
+     </form>
+     ${isAdminUser(user) ? `<h3 style="margin-top:24px">GitHub connection</h3>
+       <p class="meta">Connect a GitHub App once so packages track releases with no per-repo token.</p>
+       <p><a class="primary" href="/gh/app" style="text-decoration:none;padding:8px 16px;display:inline-block">${loadGhApp() ? 'Manage GitHub App' : 'Connect GitHub'}</a></p>` : ''}`, user);
+}
+
+// The GitHub App connect/status page (admin).  Not configured -> a one-click
+// create (App-manifest flow); configured -> the App, its installations, and
+// install / sync / disconnect actions.
+function ghAppPage(user, opts) {
+  opts = opts || {};
+  const app = loadGhApp();
+  const msg = opts.error ? `<div class="msg err">${esc(opts.error)}</div>`
+    : opts.created ? '<div class="msg ok">GitHub App created and connected. Now install it on your org (below) so its releases reach the registry.</div>'
+    : opts.synced != null ? `<div class="msg ok">Synced — ${opts.synced} installation(s) refreshed.</div>` : '';
+  let body;
+  if (!app) {
+    body = `<h3>Connect GitHub</h3>
+      <p>Create a GitHub App <b>once</b> — no personal access token, ever. It gives the registry a single webhook that receives releases from every repo you install it on, so adding a package "just works," webhook and all.</p>
+      <form method="get" action="/gh/app/create" style="margin-top:14px">
+        <input type="text" name="org" placeholder="GitHub org (optional, e.g. mvx-lang)" style="max-width:320px">
+        <div style="margin-top:10px"><button class="primary" type="submit">Create GitHub App</button></div>
+      </form>
+      <p class="meta">Leave the org blank to create it under your own account; you can still install it on any org afterwards.</p>`;
+  } else {
+    const installUrl = ghAppInstallUrl(app);
+    const owners = Object.keys(app.installs || {});
+    const instList = owners.length
+      ? owners.map(o => { const i = app.installs[o]; const n = i.selection === 'all' ? 'all repos' : (Object.keys(i.repos || {}).length + ' repo(s)'); return `<li><b>${esc(o)}</b> &mdash; ${esc(n)}</li>`; }).join('')
+      : '<li class="meta">No installations yet — install the App on your org below.</li>';
+    body = `<h3>GitHub App connected</h3>
+      <div class="card"><b>${esc(app.name || app.slug || 'app')}</b> <span class="badge">app id ${esc(String(app.appId))}</span>
+      ${app.htmlUrl ? `<br><span class="meta"><a href="${esc(app.htmlUrl)}" target="_blank" rel="noreferrer">manage on GitHub</a></span>` : ''}</div>
+      <h3 style="margin-top:20px">Installations</h3>
+      <ul>${instList}</ul>
+      <p style="margin-top:8px">
+        ${installUrl ? `<a class="primary" href="${esc(installUrl)}" target="_blank" rel="noreferrer" style="text-decoration:none;padding:8px 16px;display:inline-block">Install / configure on GitHub</a>` : ''}
+        <form method="post" action="/gh/app/sync" style="display:inline;margin-left:8px"><button type="submit">Sync installations</button></form>
+        <form method="post" action="/gh/app/disconnect" style="display:inline;margin-left:8px" onsubmit="return confirm('Disconnect the GitHub App? Existing per-repo webhooks are unaffected.')"><button type="submit">Disconnect</button></form>
+      </p>
+      <p class="meta">After installing on an org, releases from its repos auto-index. If an install isn't showing, click Sync.</p>`;
+  }
+  return page('GitHub App — mv_package', msg + body, user);
 }
 
 // ---- packages: a source-tracked index (no hosting) ------------------
@@ -701,6 +788,21 @@ function addPackage(user, source, pkgOverride, cb) {
     });
 
     withReadme(() => withVersions(() => {
+      const repo = provider.name === 'github' ? ref.repo : null;
+      const app = loadGhApp();
+      // When a GitHub App is connected it is the source of truth for github
+      // tracking: its single org-wide webhook already delivers this repo's
+      // releases (no per-repo hook, no PAT), or the App just needs installing on
+      // the owner (one click) — never fall back to a token that may 403.
+      if (repo && app) {
+        if (ghAppCoversRepo(app, repo)) {
+          const fresh = loadPackage(name);
+          if (fresh) { fresh.tracking = fresh.tracking || {}; fresh.tracking.viaApp = true; fresh.tracking.hookId = null; savePackage(fresh); }
+          return indexLatest(true, null);
+        }
+        return indexLatest(false, `the GitHub App is not installed on "${repo.split('/')[0]}" — install it (one click) to auto-track releases: ${ghAppInstallUrl(app)}`);
+      }
+      // No App connected — legacy per-repo webhook via GITHUB_TOKEN (or none).
       if (provider.supportsTracking) {
         provider.installTracking(ref, { hookUrl: `${BASE_URL}/webhook/${meta.tracking.id}`, secret: meta.tracking.secret }, (herr, hook) => {
           if (hook) { const fresh = loadPackage(name); if (fresh && fresh.tracking) { fresh.tracking.hookId = hook.id || null; savePackage(fresh); } }
@@ -821,6 +923,31 @@ const server = http.createServer((req, res) => {
         }
         return sendJSON(res, 200, { ok: true });
       }
+      // GitHub App push — ONE webhook for every installed repo (no per-repo
+      // hook, no PAT).  Verified with the App's single secret; `release` events
+      // index by repo, `installation` events (un)register the App's coverage.
+      if (parts[0] === 'gh' && parts[1] === 'app' && parts[2] === 'hook') {
+        const app = loadGhApp();
+        if (!app) { res.writeHead(404); return res.end('no app configured'); }
+        const v = ghapp.parseEvent(app.webhookSecret, req.headers, buf);
+        if (!v.valid) { res.writeHead(401); return res.end('bad signature'); }
+        if (v.ping) return sendJSON(res, 200, { ok: true });
+        if (v.release) {
+          const pkg = findPackageByRepo(v.release.repo);
+          if (pkg) {
+            const fresh = loadPackage(pkg.name);
+            const n = fresh ? indexRelease(fresh, v.release.release) : 0;
+            console.log(`gh-app: ${pkg.name} <- release ${v.release.release.tag} (indexed ${n})`);
+            refreshMeta(pkg, () => {});                    // push-driven manifest refresh
+          } else {
+            console.log(`gh-app: release for ${v.release.repo} — no matching package`);
+          }
+        } else if (v.install) {
+          ghAppApplyInstall(app, v.install);
+          console.log(`gh-app: installation ${v.install.action} for ${v.install.account}`);
+        }
+        return sendJSON(res, 200, { ok: true });
+      }
       // WebAuthn verify endpoints take a JSON body
       if (u.pathname === '/webauthn/register/verify' || u.pathname === '/webauthn/login/verify') {
         let body; try { body = JSON.parse(buf.toString()); } catch { return sendJSON(res, 400, { error: 'bad json' }); }
@@ -901,6 +1028,39 @@ const server = http.createServer((req, res) => {
           return sendHTML(res, 200, accountPage(loadUser(actor.user.username), { refreshed: pkg.name }));
         });
       }
+      // GitHub App admin actions (admin only).
+      if (u.pathname === '/gh/app/disconnect') {
+        if (!user || !isAdminUser(user)) return redirect(res, user ? '/account' : '/login');
+        try { fs.rmSync(GHAPP_FILE, { force: true }); } catch {}
+        return redirect(res, '/gh/app');
+      }
+      if (u.pathname === '/gh/app/sync') {
+        if (!user || !isAdminUser(user)) return redirect(res, user ? '/account' : '/login');
+        const app = loadGhApp();
+        if (!app) return redirect(res, '/gh/app');
+        // Relearn coverage from GitHub (a safety net for a missed `installation`
+        // webhook).  Accumulate into a local map, then persist once — no races.
+        return ghapp.listInstallations(app, (err, insts) => {
+          if (err) return sendHTML(res, 200, ghAppPage(user, { error: 'sync failed: ' + err.message }));
+          const installs = {};
+          let pending = insts.length;
+          const finish = () => { const f = loadGhApp(); if (f) { f.installs = installs; saveGhApp(f); } return sendHTML(res, 200, ghAppPage(user, { synced: insts.length })); };
+          if (!pending) return finish();
+          insts.forEach(inst => {
+            const owner = String(inst.account || '').toLowerCase();
+            if (!owner) { if (--pending <= 0) finish(); return; }
+            if (inst.selection === 'all') {
+              installs[owner] = { installationId: inst.id, selection: 'all', repos: {}, updated: Date.now() };
+              if (--pending <= 0) finish(); return;
+            }
+            ghapp.installationRepos(app, inst.id, (e, repos) => {
+              const map = {}; (repos || []).forEach(r => { map[String(r).toLowerCase()] = true; });
+              installs[owner] = { installationId: inst.id, selection: 'selected', repos: map, updated: Date.now() };
+              if (--pending <= 0) finish();
+            });
+          });
+        });
+      }
       if (u.pathname === '/register') return handleRegister(req, res, form);
       if (u.pathname === '/login') return handleLogin(req, res, form);
       if (u.pathname === '/logout') { clearSessionCookie(res); return redirect(res, '/'); }
@@ -929,6 +1089,47 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/register') return sendHTML(res, 200, authForm('register'));
   if (u.pathname === '/login') return sendHTML(res, 200, authForm('login'));
   if (u.pathname === '/account') return user ? sendHTML(res, 200, accountPage(user)) : redirect(res, '/login');
+  // GitHub App: status/connect page (admin), the manifest-create redirector,
+  // and GitHub's post-create callback.
+  if (u.pathname === '/gh/app') {
+    if (!user) return redirect(res, '/login');
+    if (!isAdminUser(user)) return sendHTML(res, 403, page('GitHub App', '<div class="msg err">Admins only.</div>', user));
+    return sendHTML(res, 200, ghAppPage(user));
+  }
+  if (u.pathname === '/gh/app/create') {
+    if (!user || !isAdminUser(user)) return redirect(res, user ? '/account' : '/login');
+    if (!BASE_URL) return sendHTML(res, 200, ghAppPage(user, { error: 'set PUBLIC_ORIGIN/WEBAUTHN_ORIGIN so GitHub can redirect back.' }));
+    // GitHub's manifest flow: POST the manifest to settings/apps/new; on confirm
+    // GitHub redirects to redirect_url?code=&state=.  A signed, 15-min state is
+    // the CSRF guard.  Create under an org when given, else the user's account.
+    const org = String(u.query.org || '').trim();
+    const state = signValue({ p: 'ghapp-create', u: user.username, exp: Date.now() + 15 * 60 * 1000 });
+    const action = (org ? `https://github.com/organizations/${encodeURIComponent(org)}/settings/apps/new` : 'https://github.com/settings/apps/new') + '?state=' + encodeURIComponent(state);
+    const manifest = JSON.stringify(ghapp.buildManifest(BASE_URL));
+    return sendHTML(res, 200, page('Create GitHub App',
+      `<h3>Creating the GitHub App…</h3>
+       <p class="meta">You'll be taken to GitHub to confirm. It creates the App and sends you back here — no token to paste.</p>
+       <form id="mf" method="post" action="${esc(action)}">
+         <input type="hidden" name="manifest" value='${esc(manifest)}'>
+         <noscript><button class="primary" type="submit">Continue to GitHub</button></noscript>
+       </form>
+       <script>document.getElementById('mf').submit();</script>`, user));
+  }
+  if (u.pathname === '/gh/app/created') {
+    if (!user || !isAdminUser(user)) return redirect(res, user ? '/account' : '/login');
+    const st = readSigned(String(u.query.state || ''));
+    if (!st || st.p !== 'ghapp-create') return sendHTML(res, 400, ghAppPage(user, { error: 'invalid or expired create state — start again.' }));
+    const code = String(u.query.code || '');
+    if (!code) return sendHTML(res, 400, ghAppPage(user, { error: 'no code from GitHub — start again.' }));
+    return ghapp.convertManifest(code, (err, app) => {
+      if (err) return sendHTML(res, 200, ghAppPage(user, { error: 'App creation failed: ' + err.message }));
+      app.installs = {};
+      app.connectedBy = user.username;
+      app.connectedAt = Date.now();
+      saveGhApp(app);
+      return sendHTML(res, 200, ghAppPage(user, { created: true }));
+    });
+  }
   if (u.pathname === '/wa.js') {
     try { const js = fs.readFileSync(path.join(__dirname, 'public', 'wa.js'));
       res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Content-Length': js.length }); return res.end(js);

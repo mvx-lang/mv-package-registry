@@ -4,11 +4,13 @@
 #
 #   MVX_HOME=/path/to/mvx-lang MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
 #
-# Proves the whole loop across both repos: build the MVPKG client (from the
-# mv_package checkout), register throwaway fixture packages, start this
-# registry on a free port, then `MVPKG install` and assert what lands where —
-# install, missing-package, dependencies (deps-first), and idempotency.
-# Needs node and a built mvx-lang toolchain (http + json in its system account).
+# Proves the whole loop across all three repos against the *index-only* registry
+# (it hosts nothing; a package's tarball is an external URL).  We stand up a
+# local static file server for the fixture tarballs, seed the registry index to
+# point at them, build the MVPKG client, then `MVPKG install` and assert:
+# install + build + link, a missing package, dependencies (deps-first), an
+# optional dependency that is skipped when absent, a `provides` rename resolving
+# to its provider, and idempotency.  Needs node + a built mvx toolchain.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"                       # this registry repo
@@ -22,60 +24,97 @@ command -v node >/dev/null 2>&1 || { echo "node not found; skipping" >&2; exit 0
 export MVX_DRIVERS="$MVX_HOME/build/lib"
 
 WORK="$(mktemp -d)"
-trap '{ kill "$REGPID" && wait "$REGPID"; } 2>/dev/null; rm -rf "$WORK" "$ROOT/registry/demo" "$ROOT/registry/depdemo" "$CLIENT/mvpkg.installed"' EXIT
+REGDIR="$WORK/index"; mkdir -p "$REGDIR"             # the registry's package index
+FILES="$WORK/files"; mkdir -p "$FILES"               # tarballs the file server hosts
+export MVPKG_STORE="$WORK/store"                     # isolate the global store
+cleanup() {
+  { kill "$REGPID"; wait "$REGPID"; } 2>/dev/null
+  { kill "$FSPID"; wait "$FSPID"; } 2>/dev/null
+  rm -rf "$WORK" "$CLIENT/mvpkg.installed"
+}
+trap cleanup EXIT
 
-# 1. build the client (in its own repo)
-MVX_HOME="$MVX_HOME" "$CLIENT/build.sh" >/dev/null
+# --- a static file server for the fixture tarballs (registry hosts nothing) ---
+FSPORT="$(node -e 'const s=require("net").createServer();s.listen(0,()=>{console.log(s.address().port);s.close()})')"
+node -e '
+  const http=require("http"),fs=require("fs"),path=require("path"),dir=process.argv[1],port=+process.argv[2];
+  http.createServer((q,r)=>{const f=path.join(dir,path.basename(q.url));
+    fs.readFile(f,(e,d)=>e?(r.writeHead(404),r.end()):(r.writeHead(200),r.end(d)));}).listen(port);
+' "$FILES" "$FSPORT" &
+FSPID=$!
+BASE="http://127.0.0.1:$FSPORT"
 
-# 2. a fixture "package": an account-shaped dir with a recognisable marker
-FIX="$WORK/fixture"; mkdir -p "$FIX/BP"
-printf 'CRT "hello from demo"\n' > "$FIX/BP/DEMO"
-printf 'demo-marker\n' > "$FIX/MARKER"
-"$ROOT/mkrelease.sh" "$FIX" demo 1.0 "a throwaway fixture package" >/dev/null
+# mkfixture <name> <version> <deps-space-separated|""> <provides|""> [extra-file]
+# Builds an account-shaped tarball (PKG + BP/<NAME> + MARKER), serves it, and
+# writes the registry index entry pointing at that tarball URL.
+mkfixture() {
+  nm="$1"; ver="$2"; deps="$3"; provs="$4"
+  fx="$WORK/fx_$nm"; mkdir -p "$fx/BP"
+  printf '%s\n%s\na throwaway fixture package\nmvx\n%s\n' "$nm" "$ver" "$deps" > "$fx/PKG"
+  printf 'CRT "hello from %s"\n' "$nm" > "$fx/BP/$(echo "$nm" | tr a-z A-Z)"
+  printf '%s-marker\n' "$nm" > "$fx/MARKER"
+  ( cd "$fx" && tar -czf "$FILES/$nm.tar.gz" . )
+  mkdir -p "$REGDIR/$nm"
+  node -e '
+    const fs=require("fs"),[dir,nm,ver,url,deps,provs]=process.argv.slice(1);
+    fs.writeFileSync(dir+"/meta.json", JSON.stringify({
+      name:nm, owner:"test", source:"http://example/"+nm, version:ver, tarball:url,
+      dependencies:deps, provides:provs,
+      artifacts:[{kind:"source",tarball:url,external:true}],
+      versions:[{version:ver,tag:ver}], systems:["mvx"] }, null, 2));
+  ' "$REGDIR/$nm" "$nm" "$ver" "$BASE/$nm.tar.gz" "$deps" "$provs"
+}
 
-# 3. registry on an OS-chosen free port
-PORT="$(node -e 'const s=require("net").createServer();s.listen(0,()=>{console.log(s.address().port);s.close()})')"
-node "$ROOT/server.js" "$PORT" >"$WORK/reg.log" 2>&1 &
+# --- fixtures --------------------------------------------------------------
+mkfixture demo    1.0 ""     ""            # a leaf package
+mkfixture depdemo 1.0 "demo" ""            # depends on demo
+mkfixture optdemo 1.0 "?ghost" ""          # optional dep on a package we never publish
+mkfixture cursors 2.0 ""     "oldcurses"   # provides a virtual (renamed) name
+mkfixture usescur 1.0 "oldcurses" ""       # depends on the virtual name
+
+# --- registry + client -----------------------------------------------------
+REGPORT="$(node -e 'const s=require("net").createServer();s.listen(0,()=>{console.log(s.address().port);s.close()})')"
+MVPKG_REGISTRY_DIR="$REGDIR" node "$ROOT/server.js" "$REGPORT" >"$WORK/reg.log" 2>&1 &
 REGPID=$!
 sleep 1
+export MVPKG_REGISTRY="http://127.0.0.1:$REGPORT"
+MVX_HOME="$MVX_HOME" "$CLIENT/build.sh" >/dev/null
 
-export MVPKG_REGISTRY="http://127.0.0.1:$PORT"
-DEST="$WORK/installed"
-
-# 4. install and assert
-MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install demo $DEST" >"$WORK/out" 2>&1
-cat "$WORK/out"
-
+# each install starts fresh (empty store + account manifest) so every package is
+# genuinely downloaded/built/linked and prints "installed <name> <ver>".
+inst() { rm -rf "$MVPKG_STORE"; rm -f "$CLIENT/mvpkg.installed"; MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install $1" 2>&1; }
 fail=0
-grep -q "installed demo 1.0" "$WORK/out"   || { echo "FAIL: no install confirmation"; fail=1; }
-[ -f "$DEST/MARKER" ]                       || { echo "FAIL: MARKER not installed"; fail=1; }
-[ -f "$DEST/BP/DEMO" ]                       || { echo "FAIL: BP/DEMO not installed"; fail=1; }
-grep -q demo-marker "$DEST/MARKER" 2>/dev/null || { echo "FAIL: MARKER content wrong"; fail=1; }
+say() { echo "FAIL: $1"; fail=1; }
 
-# 5. a missing package must report cleanly, not install anything
-MISS="$WORK/miss"
-MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install nosuch $MISS" >"$WORK/miss.out" 2>&1
-grep -q "not found in registry" "$WORK/miss.out" || { echo "FAIL: missing pkg not reported"; fail=1; }
-[ -d "$MISS" ] && { echo "FAIL: missing pkg created a dest dir"; fail=1; }
+# 1. install a leaf: downloaded, built, linked; recorded in the store + account
+OUT="$(inst demo)"; echo "$OUT" | sed 's/^/  demo> /'
+echo "$OUT" | grep -q "installed demo 1.0"      || say "leaf not installed"
+[ -f "$MVPKG_STORE/demo/MARKER" ]                || say "leaf not unpacked to the store"
+grep -qx demo "$CLIENT/mvpkg.installed" 2>/dev/null || say "leaf not recorded in the account"
 
-# 6. dependencies: a package that depends on another installs both, deps first
-FIX2="$WORK/fixture2"; mkdir -p "$FIX2/BP"
-printf 'depdemo-marker\n' > "$FIX2/MARKER"
-"$ROOT/mkrelease.sh" "$FIX2" depdemo 1.0 "depends on demo" "demo" >/dev/null
-rm -f "$CLIENT/mvpkg.installed"          # fresh account: nothing installed yet
-D2="$WORK/inst2"
-( cd "$WORK" && MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install depdemo $D2" ) >"$WORK/dep.out" 2>&1
-cat "$WORK/dep.out"
-grep -q "installed demo 1.0" "$WORK/dep.out"    || { echo "FAIL: dependency demo not installed"; fail=1; }
-grep -q "installed depdemo 1.0" "$WORK/dep.out" || { echo "FAIL: depdemo not installed"; fail=1; }
-[ -f "$D2/MARKER" ]                              || { echo "FAIL: depdemo not installed to dest"; fail=1; }
-DL=$(grep -n "installed demo 1.0" "$WORK/dep.out" | head -1 | cut -d: -f1)
-PL=$(grep -n "installed depdemo 1.0" "$WORK/dep.out" | head -1 | cut -d: -f1)
-{ [ -n "$DL" ] && [ -n "$PL" ] && [ "$DL" -lt "$PL" ]; } || { echo "FAIL: dependency not installed before dependent"; fail=1; }
-{ grep -qx demo "$CLIENT/mvpkg.installed" && grep -qx depdemo "$CLIENT/mvpkg.installed"; } 2>/dev/null || { echo "FAIL: manifest missing entries"; fail=1; }
+# 2. a missing package reports cleanly and records nothing
+OUT="$(inst nosuch)"
+echo "$OUT" | grep -q "not found in registry"   || say "missing package not reported"
 
-# 7. idempotent: installing again with the manifest present is a no-op
-( cd "$WORK" && MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install depdemo $D2" ) >"$WORK/again.out" 2>&1
-grep -q "fetching" "$WORK/again.out" && { echo "FAIL: reinstalled an already-installed package"; fail=1; }
+# 3. dependencies: depdemo pulls demo first, then itself
+OUT="$(inst depdemo)"; echo "$OUT" | sed 's/^/  dep> /'
+DL=$(echo "$OUT" | grep -n "installed demo 1.0"    | head -1 | cut -d: -f1)
+PL=$(echo "$OUT" | grep -n "installed depdemo 1.0" | head -1 | cut -d: -f1)
+{ [ -n "$DL" ] && [ -n "$PL" ] && [ "$DL" -lt "$PL" ]; } || say "dependency not installed before dependent"
+
+# 4. an optional dependency that is not published is skipped, not fatal
+OUT="$(inst optdemo)"; echo "$OUT" | sed 's/^/  opt> /'
+echo "$OUT" | grep -qi "optional dependency .*ghost.* skipping" || say "optional dep not skipped"
+echo "$OUT" | grep -q "installed optdemo 1.0"    || say "consumer of an optional dep not installed"
+
+# 5. provides: depending on the old virtual name installs the provider (cursors)
+OUT="$(inst usescur)"; echo "$OUT" | sed 's/^/  prov> /'
+echo "$OUT" | grep -q "installed cursors 2.0"    || say "virtual name did not resolve to its provider"
+echo "$OUT" | grep -q "installed usescur 1.0"    || say "consumer of a virtual dep not installed"
+
+# 6. idempotent: re-installing with the manifest present fetches nothing
+inst demo >/dev/null
+OUT="$(MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install demo" 2>&1)"
+echo "$OUT" | grep -qi "fetching"                && say "re-fetched an already-installed package"
 
 if [ "$fail" = 0 ]; then echo "PASS: end-to-end install loop"; else exit 1; fi

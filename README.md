@@ -96,11 +96,24 @@ In your account, paste a **source URL** — a repository, or a link to an
 `mvpkg.json`.  A source provider ([`lib/providers.js`](lib/providers.js))
 handles it:
 
-- **github** — reads `mvpkg.json` via the Contents API, tracks releases, and
-  **auto-installs a release webhook** (needs a `GITHUB_TOKEN` with
-  `admin:repo_hook`).
+- **github** — reads `mvpkg.json` via the Contents API and tracks releases. If a
+  **GitHub App** is connected (see below), tracking is automatic for every repo
+  the App is installed on — no per-repo token, no per-repo hook. Otherwise it
+  falls back to installing a per-repo webhook with a `GITHUB_TOKEN` (needs
+  `admin:repo_hook` / fine-grained *Webhooks: write*).
 - **gitlab** — manifest + releases via the API (no push webhook yet).
 - **manifest** — any `mvpkg.json` URL (metadata only).
+
+### Connect GitHub once (recommended — no PAT)
+
+An admin opens **`/gh/app`** and clicks **Create GitHub App**: GitHub's
+App-manifest flow creates the App in one step (nothing to paste) and sends back
+its id, private key, and webhook secret, which the registry stores in
+`_auth/github-app.json`. Then **Install** the App on your org. From then on the
+App delivers a `release` event for *every* installed repo to one App-level
+webhook (`POST /gh/app/hook`), so adding a package "just works," webhook and
+all — the `admin:repo_hook` PAT (and its 403s) is no longer needed. A missed
+`installation` event can be re-learned with **Sync** ([`lib/ghapp.js`](lib/ghapp.js)).
 
 The registry reads the name + description/licence/dependencies from the
 manifest, records the source, and indexes the current release.  Updates are
@@ -131,9 +144,11 @@ docker compose up -d --build           # container (persistent data volume + .en
 ```
 
 The live site runs the container on the hosting VM behind Traefik
-(`mv-package.heydon.io`).  `.env`: optional `GITHUB_TOKEN` (webhook
-auto-install + higher API limits), `MVPKG_ADMIN_USERS`,
-`WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN`, and the Turnstile keys.
+(`mv-package.heydon.io`).  `.env`: `PUBLIC_ORIGIN` (so GitHub can redirect back
+from the App-manifest flow — defaults to `WEBAUTHN_ORIGIN`), `MVPKG_ADMIN_USERS`,
+`WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN`, the Turnstile keys, and — only if you are
+*not* using the GitHub App — an optional `GITHUB_TOKEN` for the legacy per-repo
+webhook fallback / higher API limits.
 
 ## Test
 
