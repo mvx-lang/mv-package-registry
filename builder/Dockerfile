@@ -15,6 +15,7 @@ RUN dnf -y install epel-release \
         unixODBC libnsl \
         glibc-langpack-en \
         libgit2_1.7-devel \
+        libcurl-devel \
     && dnf clean all
 
 # match the source install's group ownership
