@@ -45,7 +45,17 @@ udt-run 'rm -rf dist && mkdir -p dist && sh build-udt.sh /pkg/dist'
   echo "::error::build-udt.sh produced no dist/ tree" >&2; exit 1; }
 
 TARBALL="${BASE}.tar.gz"
-tar czf "$TARBALL" -C dist .          # contents at the tar root (no wrapping dir)
+# If build-udt.sh staged a SINGLE top-level directory (an account-shaped package,
+# e.g. git/), tar it BY NAME so entries are "<dir>/..." with no "./" prefix — the
+# release unpacks to that named account dir, and MVPKG strips the one leading
+# component on install.  Otherwise tar the contents at the root (legacy layout,
+# "./..." entries, which MVPKG leaves unstripped).
+n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
+if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
+  tar czf "$TARBALL" -C dist "$one_top"
+else
+  tar czf "$TARBALL" -C dist .
+fi
 sha256sum "$TARBALL" > "$TARBALL.sha256"
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
