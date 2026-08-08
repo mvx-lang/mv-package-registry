@@ -11,7 +11,8 @@ test('buildManifest points its single webhook + redirect at us', () => {
   assert.strictEqual(m.hook_attributes.url, 'https://reg.example/gh/app/hook');
   assert.strictEqual(m.redirect_url, 'https://reg.example/gh/app/created');
   assert.ok(m.default_events.includes('release'));
-  assert.ok(m.default_events.includes('installation'));
+  // installation events are auto-delivered — GitHub rejects them in default_events
+  assert.ok(!m.default_events.includes('installation'));
   assert.strictEqual(m.default_permissions.contents, 'read');   // required for release events
 });
 
