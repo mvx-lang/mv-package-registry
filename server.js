@@ -774,8 +774,17 @@ function addPackage(user, source, pkgOverride, cb) {
     // assets, fall back to the source of the default branch (a "dev" version),
     // so a package can be added before it cuts a release.
     const indexLatest = (installed, note) => provider.latestRelease(ref, (e2, rel) => {
-      const fresh = loadPackage(name);
-      if (fresh && !e2 && rel && rel.assets && rel.assets.length && indexRelease(fresh, rel) > 0)
+      let fresh = loadPackage(name);
+      // A real release exists: index it and keep it as the default.  indexRelease
+      // is idempotent — a 0 return means "already current", NOT "no release" — so
+      // the dev-branch fallback must key on the package actually lacking a release
+      // version, not on indexRelease's return (re-adding an up-to-date package
+      // used to clobber its default to dev-<branch>).
+      if (fresh && !e2 && rel && rel.assets && rel.assets.length) {
+        indexRelease(fresh, rel);
+        fresh = loadPackage(name);
+      }
+      if (fresh && fresh.version && !/^dev-/.test(fresh.version))
         return cb(null, { name, installed, note });
       if (fresh && provider.devVersion) {
         return provider.devVersion(ref, (e3, dev) => {
