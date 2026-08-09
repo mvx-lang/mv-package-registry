@@ -858,7 +858,10 @@ function selectArtifact(meta, system, os, arch, endian) {
     systems: meta.systems || [], owner: meta.owner, selected,
     versions: (meta.versions || []).map(v => v.version).join(' '),
     provides: meta.provides || '',
-    source: meta.source || '',                 // repo URL — MVPKG --source clones it
+    // repo URL — MVPKG --source clones it.  Named srcrepo (not "source") because
+    // the client's JSON decoder prefix-matches keys, and "source" collides with
+    // "sourceIncluded" above.
+    srcrepo: meta.source || '',
   };
 }
 
