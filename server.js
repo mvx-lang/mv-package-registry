@@ -858,6 +858,7 @@ function selectArtifact(meta, system, os, arch, endian) {
     systems: meta.systems || [], owner: meta.owner, selected,
     versions: (meta.versions || []).map(v => v.version).join(' '),
     provides: meta.provides || '',
+    source: meta.source || '',                 // repo URL — MVPKG --source clones it
   };
 }
 
