@@ -725,6 +725,7 @@ function addPackage(user, source, pkgOverride, cb) {
       man = { description: j.description || '', license: j.license || '',
         dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
         provides: Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || ''),
+        clibs: Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || ''),
         systems: Array.isArray(j.systems) ? j.systems : [] };
     } catch {} }
     if (!name || !okName(name))
@@ -740,6 +741,7 @@ function addPackage(user, source, pkgOverride, cb) {
     if (man.license) meta.license = man.license;
     if (man.dependencies) meta.dependencies = man.dependencies;
     if (man.provides !== undefined) meta.provides = man.provides;
+    if (man.clibs !== undefined) meta.clibs = man.clibs;
     if (man.systems && man.systems.length) meta.systems = [...new Set([...(meta.systems || []), ...man.systems])];
     meta.tracking = meta.tracking || { id: crypto.randomBytes(6).toString('hex'), secret: crypto.randomBytes(24).toString('base64url'), hookId: null, latest: null };
     meta.tracking.provider = provider.name;
@@ -858,6 +860,7 @@ function selectArtifact(meta, system, os, arch, endian) {
     systems: meta.systems || [], owner: meta.owner, selected,
     versions: (meta.versions || []).map(v => v.version).join(' '),
     provides: meta.provides || '',
+    clibs: meta.clibs || '',                   // OS C libraries the CallC needs
     // repo URL — MVPKG --source clones it.  Named srcrepo (not "source") because
     // the client's JSON decoder prefix-matches keys, and "source" collides with
     // "sourceIncluded" above.
@@ -885,6 +888,8 @@ function resolveExactVersion(meta, version, system, os, arch, endian) {
     systems: meta.systems || [], owner: meta.owner, selected: 'source',
     versions: (meta.versions || []).map(x => x.version).join(' '),
     provides: meta.provides || '',
+    clibs: meta.clibs || '',
+    srcrepo: meta.source || '',
   };
 }
 
@@ -1224,6 +1229,8 @@ function refreshMeta(pkg, cb) {
       if (deps && deps !== fresh.dependencies) { fresh.dependencies = deps; changed = true; }
       const provs = Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || '');
       if (provs !== (fresh.provides || '')) { fresh.provides = provs; changed = true; }
+      const clibs = Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || '');
+      if (clibs !== (fresh.clibs || '')) { fresh.clibs = clibs; changed = true; }
       if (Array.isArray(j.systems) && j.systems.length) {
         const sys = [...new Set([...(fresh.systems || []), ...j.systems])];   // additive (binaries also add systems)
         if (sys.length !== (fresh.systems || []).length) { fresh.systems = sys; changed = true; }
