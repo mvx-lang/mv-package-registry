@@ -359,6 +359,12 @@ footer{color:var(--mut);font-size:12px;border-top:1px solid var(--line);margin-t
 .pkg-side .row .k{color:var(--mut);white-space:nowrap}.pkg-side .row .val{text-align:right;word-break:break-word}
 .pkg-side .dl{display:block;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}.pkg-side .dl:first-child{border-top:0}
 .pkg-side .box a{word-break:break-all}
+.cmds{display:flex;flex-wrap:wrap;gap:5px}
+.cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--code);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg)}
+.cmd.danger{border-color:var(--err);color:var(--err);background:#fbeceb}
+.shellwarn{border:1px solid var(--err);background:#fbeceb;color:var(--err);border-radius:8px;padding:10px 14px;margin:0 0 22px;font-size:14px;line-height:1.5}
+.shellwarn code{background:var(--card);border:1px solid var(--err);border-radius:4px;padding:0 4px;font-size:12px}
+.warnbadge{font-size:10px;color:#fff;background:var(--err);border-radius:10px;padding:1px 7px;vertical-align:middle;font-weight:600;margin-left:4px}
 .readme{line-height:1.6}
 .readme h1,.readme h2,.readme h3,.readme h4,.readme h5{margin:22px 0 8px;line-height:1.3}
 .readme h1{font-size:22px}.readme h2{font-size:19px}.readme h3{font-size:16px}.readme h4,.readme h5{font-size:14px}
@@ -445,6 +451,19 @@ function pkgPage(name, user) {
   const row = (k, v) => `<div class="row"><span class="k">${k}</span><span class="val">${v}</span></div>`;
   const deps = String(p.dependencies || '').trim();
   const depsHtml = deps ? deps.split(/\s+/).map(d => `<a href="/p/${esc(d)}">${esc(d)}</a>`).join(', ') : '<span class="meta">none</span>';
+  // Shell surface the package declares (mvpkg.json "shell").  A DECLARATION —
+  // enforced only on mvx (the vendor OSEXEC permit); documentation everywhere
+  // else.  The danger set is defined HERE (the site's authority), so a package
+  // cannot self-declare a privileged command as safe.
+  const DANGER = new Set(['sudo','su','doas','chown','chmod','chgrp','chattr','rm','rmdir','dd','mkfs','shred','mount','umount']);
+  const shellArr = String(p.shell || '').trim() ? String(p.shell).trim().split(/\s+/) : [];
+  const shellDanger = shellArr.filter(c => DANGER.has(c));
+  const shellHtml = shellArr.length
+    ? `<div class="cmds">${shellArr.map(c => `<code class="cmd${DANGER.has(c) ? ' danger" title="privileged / destructive' : ''}">${esc(c)}</code>`).join('')}</div>`
+    : '<span class="meta">none declared</span>';
+  const shellWarn = shellDanger.length
+    ? `<div class="shellwarn">⚠ This package runs <b>privileged</b> shell commands on the host during install: ${shellDanger.map(c => `<code>${esc(c)}</code>`).join(' ')}. Review the source before installing.</div>`
+    : '';
   const sys = (p.systems && p.systems.length) ? p.systems.map(s => `<span class="badge">${esc(s)}</span>`).join('') : '<span class="meta">any</span>';
   const hasSource = p.artifacts && p.artifacts.some(a => a.kind === 'source');
   const hasBinary = p.artifacts && p.artifacts.some(a => a.kind === 'binary');
@@ -472,6 +491,7 @@ function pkgPage(name, user) {
       <p class="lead">${esc(p.description || '')}${repoUrl ? ` <a class="repo-link" href="${esc(repoUrl)}">repository &nearr;</a>` : ''}</p>
       <h3>Install</h3>
       <pre>MVPKG install ${esc(p.name)}</pre>
+      ${shellWarn}
       <h3>About</h3>
       ${about}
       <p class="meta" style="margin-top:26px">Indexed from its source — the registry hosts nothing.${isDev ? ' No tagged release yet; tracking the default branch (a dev version).' : ''} &middot; <a href="/">all packages</a></p>
@@ -496,6 +516,7 @@ function pkgPage(name, user) {
         (p.owner ? row('Maintainer', esc(p.owner)) : '')
       }</div>
       <div class="box"><h4>Dependencies</h4>${depsHtml}</div>
+      ${shellArr.length ? `<div class="box"><h4>Shell commands${shellDanger.length ? '<span class="warnbadge">privileged</span>' : ''}</h4>${shellHtml}<p class="meta" style="margin-top:8px">OS commands this package runs on the host. Enforced as a least-privilege allow-list on mvx; a declaration elsewhere.</p></div>` : ''}
       ${repoUrl ? `<div class="box"><h4>Repository</h4><a href="${esc(repoUrl)}">${esc(repoHost)}</a></div>` : ''}
       ${p.source && p.source !== repoUrl ? `<div class="box"><h4>Source</h4><a href="${esc(p.source)}">${esc(p.source.replace(/^https?:\/\//, ''))}</a></div>` : ''}
       <div class="box"><h4>Versions</h4>${versHtml}</div>
@@ -726,6 +747,7 @@ function addPackage(user, source, pkgOverride, cb) {
         dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
         provides: Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || ''),
         clibs: Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || ''),
+        shell: Array.isArray(j.shell) ? j.shell.join(' ') : (j.shell || ''),
         systems: Array.isArray(j.systems) ? j.systems : [] };
     } catch {} }
     if (!name || !okName(name))
@@ -742,6 +764,7 @@ function addPackage(user, source, pkgOverride, cb) {
     if (man.dependencies) meta.dependencies = man.dependencies;
     if (man.provides !== undefined) meta.provides = man.provides;
     if (man.clibs !== undefined) meta.clibs = man.clibs;
+    if (man.shell !== undefined) meta.shell = man.shell;
     if (man.systems && man.systems.length) meta.systems = [...new Set([...(meta.systems || []), ...man.systems])];
     meta.tracking = meta.tracking || { id: crypto.randomBytes(6).toString('hex'), secret: crypto.randomBytes(24).toString('base64url'), hookId: null, latest: null };
     meta.tracking.provider = provider.name;
@@ -861,6 +884,7 @@ function selectArtifact(meta, system, os, arch, endian) {
     versions: (meta.versions || []).map(v => v.version).join(' '),
     provides: meta.provides || '',
     clibs: meta.clibs || '',                   // OS C libraries the CallC needs
+    shell: meta.shell || '',                   // OS commands the package shells out
     // repo URL — MVPKG --source clones it.  Named srcrepo (not "source") because
     // the client's JSON decoder prefix-matches keys, and "source" collides with
     // "sourceIncluded" above.
@@ -889,6 +913,7 @@ function resolveExactVersion(meta, version, system, os, arch, endian) {
     versions: (meta.versions || []).map(x => x.version).join(' '),
     provides: meta.provides || '',
     clibs: meta.clibs || '',
+    shell: meta.shell || '',
     srcrepo: meta.source || '',
   };
 }
@@ -1231,6 +1256,8 @@ function refreshMeta(pkg, cb) {
       if (provs !== (fresh.provides || '')) { fresh.provides = provs; changed = true; }
       const clibs = Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || '');
       if (clibs !== (fresh.clibs || '')) { fresh.clibs = clibs; changed = true; }
+      const shell = Array.isArray(j.shell) ? j.shell.join(' ') : (j.shell || '');
+      if (shell !== (fresh.shell || '')) { fresh.shell = shell; changed = true; }
       if (Array.isArray(j.systems) && j.systems.length) {
         const sys = [...new Set([...(fresh.systems || []), ...j.systems])];   // additive (binaries also add systems)
         if (sys.length !== (fresh.systems || []).length) { fresh.systems = sys; changed = true; }
