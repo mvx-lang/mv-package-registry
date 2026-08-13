@@ -16,6 +16,7 @@ RUN dnf -y install epel-release \
         glibc-langpack-en \
         libgit2_1.7-devel \
         libcurl-devel \
+        curl sudo \
     && dnf clean all
 
 # match the source install's group ownership
@@ -53,6 +54,34 @@ ENV UDTHOME=/usr/ud83 \
     TERM=xterm \
     LANG=en_US.UTF-8 \
     LIBGIT2_LIBS=-l:libgit2.so.1.7
+
+# MVPKG — the MV package manager, installed so a package BUILD can provision the
+# shared platform header.  A cross-platform package compiles against
+# `$INCLUDE MVPKG.INC PLATFORM.H` (the $DEFINE MV / $DEFINE UDT vendor defines),
+# and that include is provisioned per account by `MVPKG init` — so mvpkg has to be
+# here for such a package to compile at all.  Its build-udt.sh runs
+# `MVPKG init -y` in the scratch account it creates.
+#
+# Installed at IMAGE build (once) rather than per build: udt-run starts a fresh
+# `docker run --rm` container for every invocation, so a runtime install would be
+# thrown away.  install.sh needs UniData up, which docker build does not start —
+# hence the explicit startud.  UDT_OWNER=root: the unpacked tar carries the
+# publisher's uid, which is not a user here.  MVPKG is additionally cataloged
+# GLOBALLY (install.sh keeps it local to its operator account) so any scratch
+# account can run `MVPKG init`; safe in a disposable build container, and it
+# also shadows any stale MVPKG carried in the captured catalog.
+ARG MVPKG_VERSION=1.15.0
+RUN set -eu; \
+    cd /tmp; \
+    curl -fsSL -o mvpkg.tar.gz \
+      "https://github.com/mvx-lang/mv_package/releases/download/${MVPKG_VERSION}/mvx-lang_mvpkg-${MVPKG_VERSION}-udt-any-any-le.tar.gz"; \
+    tar xzf mvpkg.tar.gz -C /opt; \
+    rm -f mvpkg.tar.gz; \
+    chown -R root:root /opt/mvpkg; \
+    yes | "$UDTBIN/startud" >/tmp/startud.log 2>&1 || true; \
+    cd /opt/mvpkg && UDT_OWNER=root UDT_GROUP=unidata ./install.sh; \
+    printf 'CATALOG BP MVPKG FORCE\nQUIT\n' | udt >/dev/null 2>&1; \
+    ls "$UDTHOME/sys/CTLG/m/MVPKG" >/dev/null
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
