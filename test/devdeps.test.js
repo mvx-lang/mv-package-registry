@@ -52,6 +52,15 @@ test('devDependencies: build deps are served, and distinct from runtime deps', a
     versions: [{ version: '1.0.0', tag: '1.0.0' }],
   }, null, 2));
 
+  fs.mkdirSync(path.join(regdir, 'mvx-lang', 'emptied'), { recursive: true });
+  fs.writeFileSync(path.join(regdir, 'mvx-lang', 'emptied', 'meta.json'), JSON.stringify({
+    name: 'mvx-lang/emptied', owner: 'gordon', source: 'https://github.com/mvx-lang/emptied',
+    version: '1.0.0', tarball: 'https://example/dl/1.0.0/src.tar.gz',
+    dependencies: '', devDependencies: 'mvx-lang/mvpkg',
+    artifacts: [{ kind: 'source', tarball: 'https://example/dl/1.0.0/src.tar.gz', external: true }],
+    versions: [{ version: '1.0.0', tag: '1.0.0' }],
+  }, null, 2));
+
   const srv = spawn(process.execPath, [path.join(ROOT, 'server.js'), String(port)],
     { env: { ...process.env, MVPKG_REGISTRY_DIR: regdir }, stdio: ['ignore', 'pipe', 'pipe'] });
   for (let i = 0; i < 100; i++) { try { if ((await get(port, host, '/')).status === 200) break; } catch {} await new Promise(r => setTimeout(r, 50)); }
@@ -77,6 +86,15 @@ test('devDependencies: build deps are served, and distinct from runtime deps', a
   await t.test('a package without build deps reports an empty string', async () => {
     const j = JSON.parse((await get(port, host, '/package/mvx-lang/plain')).body);
     assert.strictEqual(j.devDependencies, '');
+  });
+
+  await t.test('a package that moved its last runtime dep to devDependencies clears it', async () => {
+    // getopt moved mvpkg from dependencies to devDependencies, leaving NO runtime
+    // deps.  A refresh/add must be able to CLEAR the stored list — guarding on
+    // truthiness would leave the stale runtime dependency behind for ever.
+    const j = JSON.parse((await get(port, host, '/package/mvx-lang/emptied')).body);
+    assert.strictEqual(j.dependencies, '');
+    assert.strictEqual(j.devDependencies, 'mvx-lang/mvpkg');
   });
 
   await t.test('the index lists them too', async () => {

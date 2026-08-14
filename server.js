@@ -773,7 +773,9 @@ function addPackage(user, source, pkgOverride, cb) {
     meta.source = provider.sourceUrl(ref);
     if (man.description) meta.description = man.description;
     if (man.license) meta.license = man.license;
-    if (man.dependencies) meta.dependencies = man.dependencies;
+    // !== undefined, not truthiness: a manifest that REMOVES its last runtime
+    // dependency (moving it to devDependencies, say) must be able to clear it.
+    if (man.dependencies !== undefined) meta.dependencies = man.dependencies;
     if (man.devDependencies !== undefined) meta.devDependencies = man.devDependencies;
     if (man.provides !== undefined) meta.provides = man.provides;
     if (man.clibs !== undefined) meta.clibs = man.clibs;
@@ -1266,7 +1268,9 @@ function refreshMeta(pkg, cb) {
       if (j.description && j.description !== fresh.description) { fresh.description = j.description; changed = true; }
       if (j.license && j.license !== fresh.license) { fresh.license = j.license; changed = true; }
       const deps = Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || '');
-      if (deps && deps !== fresh.dependencies) { fresh.dependencies = deps; changed = true; }
+      // compare against the stored value (like provides/clibs/shell below) rather
+      // than requiring a non-empty list, so emptying the list actually clears it.
+      if (deps !== (fresh.dependencies || '')) { fresh.dependencies = deps; changed = true; }
       const devdeps = Array.isArray(j.devDependencies) ? j.devDependencies.join(' ') : (j.devDependencies || '');
       if (devdeps !== (fresh.devDependencies || '')) { fresh.devDependencies = devdeps; changed = true; }
       const provs = Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || '');
