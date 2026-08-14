@@ -450,7 +450,15 @@ function pkgPage(name, user) {
   if (!p) return null;
   const row = (k, v) => `<div class="row"><span class="k">${k}</span><span class="val">${v}</span></div>`;
   const deps = String(p.dependencies || '').trim();
-  const depsHtml = deps ? deps.split(/\s+/).map(d => `<a href="/p/${esc(d)}">${esc(d)}</a>`).join(', ') : '<span class="meta">none</span>';
+  const depLinks = s => s.split(/\s+/).map(d => `<a href="/p/${esc(d)}">${esc(d)}</a>`).join(', ');
+  // Build dependencies are shown alongside, tagged: they are needed to COMPILE
+  // the package (mvpkg provisions the shared PLATFORM.H), not to run it, so
+  // only a --source install pulls them.
+  const devDeps = String(p.devDependencies || '').trim();
+  const depsHtml = (deps || devDeps)
+    ? [deps ? depLinks(deps) : '', devDeps ? `<span class="meta">to build:</span> ${depLinks(devDeps)}` : '']
+        .filter(Boolean).join('<br>')
+    : '<span class="meta">none</span>';
   // Shell surface the package declares (mvpkg.json "shell").  A DECLARATION —
   // enforced only on mvx (the vendor OSEXEC permit); documentation everywhere
   // else.  The danger set is defined HERE (the site's authority), so a package
@@ -745,6 +753,10 @@ function addPackage(user, source, pkgOverride, cb) {
       if (!name && j.name) name = String(j.name);
       man = { description: j.description || '', license: j.license || '',
         dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
+        // BUILD dependencies: needed to COMPILE the package, never to run it
+        // (mvpkg provisions the shared PLATFORM.H managed packages $INCLUDE).
+        // Only a --source install pulls them; a binary install ships compiled.
+        devDependencies: Array.isArray(j.devDependencies) ? j.devDependencies.join(' ') : (j.devDependencies || ''),
         provides: Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || ''),
         clibs: Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || ''),
         shell: Array.isArray(j.shell) ? j.shell.join(' ') : (j.shell || ''),
@@ -762,6 +774,7 @@ function addPackage(user, source, pkgOverride, cb) {
     if (man.description) meta.description = man.description;
     if (man.license) meta.license = man.license;
     if (man.dependencies) meta.dependencies = man.dependencies;
+    if (man.devDependencies !== undefined) meta.devDependencies = man.devDependencies;
     if (man.provides !== undefined) meta.provides = man.provides;
     if (man.clibs !== undefined) meta.clibs = man.clibs;
     if (man.shell !== undefined) meta.shell = man.shell;
@@ -879,6 +892,7 @@ function selectArtifact(meta, system, os, arch, endian) {
   return {
     name: meta.name, version: meta.version, tarball,
     description: meta.description || '', dependencies: meta.dependencies || '',
+    devDependencies: meta.devDependencies || '',   // needed to BUILD (--source only)
     license: meta.license || '', sourceIncluded,
     systems: meta.systems || [], owner: meta.owner, selected,
     versions: (meta.versions || []).map(v => v.version).join(' '),
@@ -908,6 +922,7 @@ function resolveExactVersion(meta, version, system, os, arch, endian) {
   return {
     name: meta.name, version, tarball,
     description: meta.description || '', dependencies: meta.dependencies || '',
+    devDependencies: meta.devDependencies || '',   // needed to BUILD (--source only)
     license: meta.license || '', sourceIncluded: true,
     systems: meta.systems || [], owner: meta.owner, selected: 'source',
     versions: (meta.versions || []).map(x => x.version).join(' '),
@@ -1252,6 +1267,8 @@ function refreshMeta(pkg, cb) {
       if (j.license && j.license !== fresh.license) { fresh.license = j.license; changed = true; }
       const deps = Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || '');
       if (deps && deps !== fresh.dependencies) { fresh.dependencies = deps; changed = true; }
+      const devdeps = Array.isArray(j.devDependencies) ? j.devDependencies.join(' ') : (j.devDependencies || '');
+      if (devdeps !== (fresh.devDependencies || '')) { fresh.devDependencies = devdeps; changed = true; }
       const provs = Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || '');
       if (provs !== (fresh.provides || '')) { fresh.provides = provs; changed = true; }
       const clibs = Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || '');
