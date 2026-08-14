@@ -1,10 +1,12 @@
 // mv-package-registry — `devDependencies` (build dependencies) (dependency-free).
 // Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only (see ../LICENSE).
 //
-// A package may declare `devDependencies` — packages needed to COMPILE it but
-// not to run it (mvpkg provisions the shared PLATFORM.H that managed packages
-// $INCLUDE).  Only `MVPKG install --source` pulls them; a binary install ships
-// already compiled.  The field rides along in /package so the client can see it.
+// A package may declare `devDependencies` — what has to be PRESENT to package
+// it.  It is mainly a record for whoever builds the package: the release
+// pipeline reads it to prepare the build environment (mvpkg is the usual entry,
+// since it provisions the account a build runs in).  Not needed to RUN the
+// package, so a binary install ignores them, and `MVPKG install --source` —
+// which compiles — installs them first.  The field rides along in /package.
 //
 // The client's JSON seam matches a key as "key" WITH its quotes, so
 // "devDependencies" cannot be mistaken for "dependencies" — assert both are

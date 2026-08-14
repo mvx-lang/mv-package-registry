@@ -38,9 +38,36 @@ case "$(printf '\1\2' | od -An -tx2 | tr -d ' \n')" in
 esac
 BASE="${BASE_NAME}-${VER}-udt-${OS}-${ARCH}-${ENDIAN}"
 
+# Build dependencies: what this package needs PRESENT to be packaged at all —
+# declared once in its own manifest ("devDependencies"; '+name' in PKG) rather
+# than hardcoded into the shared builder.  mvpkg is the usual one: it provisions
+# the account a build runs in (the shared PLATFORM.H, the Q-pointers), and the
+# image pre-bakes it, so that entry is satisfied already and only reported.
+# Anything else is installed into the container first.  Read with sed rather than
+# jq, which the runner is not guaranteed to have: take the bracketed list after
+# the key and pull out the quoted names.
+DEVDEPS=""
+if [ -f mvpkg.json ]; then
+  DEVDEPS="$(tr -d '\n' < mvpkg.json \
+    | sed -n 's/.*"devDependencies"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' \
+    | tr ',' '\n' | sed -n 's/.*"\([^"]*\)".*/\1/p' | tr '\n' ' ')"
+fi
+[ -n "$DEVDEPS" ] && echo "build-release: build dependencies: $DEVDEPS"
+export DEVDEPS
+
 # Build + stage inside the licensed container (udt-run mounts . at /pkg and
-# chowns anything root created back to the runner user).
-udt-run 'rm -rf dist && mkdir -p dist && sh build-udt.sh /pkg/dist'
+# chowns anything root created back to the runner user).  The build deps are
+# satisfied in the SAME container: udt-run starts a fresh `docker run --rm` per
+# invocation, so anything installed in a separate one would be thrown away.
+udt-run '
+for d in '"$DEVDEPS"'; do
+  case "$d" in
+    */mvpkg|mvpkg) echo "build-release: build dep $d is pre-installed in the builder image" ;;
+    *) echo "build-release: installing build dependency $d"
+       ( cd /opt/mvpkg && printf "MVPKG install %s\nQUIT\n" "$d" | udt ) ;;
+  esac
+done
+rm -rf dist && mkdir -p dist && sh build-udt.sh /pkg/dist'
 [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ] || {
   echo "::error::build-udt.sh produced no dist/ tree" >&2; exit 1; }
 
