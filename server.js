@@ -753,9 +753,12 @@ function addPackage(user, source, pkgOverride, cb) {
       if (!name && j.name) name = String(j.name);
       man = { description: j.description || '', license: j.license || '',
         dependencies: Array.isArray(j.dependencies) ? j.dependencies.join(' ') : (j.dependencies || ''),
-        // BUILD dependencies: needed to COMPILE the package, never to run it
-        // (mvpkg provisions the shared PLATFORM.H managed packages $INCLUDE).
-        // Only a --source install pulls them; a binary install ships compiled.
+        // BUILD dependencies: what has to be PRESENT to package this one —
+        // primarily a record for whoever builds it (the release pipeline reads
+        // it to prepare the build), and mvpkg is the usual entry: it provisions
+        // the account a build runs in.  Not needed to RUN the package, so a
+        // binary install ignores them; `MVPKG install --source`, which compiles,
+        // installs them first.
         devDependencies: Array.isArray(j.devDependencies) ? j.devDependencies.join(' ') : (j.devDependencies || ''),
         provides: Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || ''),
         clibs: Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || ''),
@@ -894,7 +897,7 @@ function selectArtifact(meta, system, os, arch, endian) {
   return {
     name: meta.name, version: meta.version, tarball,
     description: meta.description || '', dependencies: meta.dependencies || '',
-    devDependencies: meta.devDependencies || '',   // needed to BUILD (--source only)
+    devDependencies: meta.devDependencies || '',   // what it takes to PACKAGE this
     license: meta.license || '', sourceIncluded,
     systems: meta.systems || [], owner: meta.owner, selected,
     versions: (meta.versions || []).map(v => v.version).join(' '),
@@ -924,7 +927,7 @@ function resolveExactVersion(meta, version, system, os, arch, endian) {
   return {
     name: meta.name, version, tarball,
     description: meta.description || '', dependencies: meta.dependencies || '',
-    devDependencies: meta.devDependencies || '',   // needed to BUILD (--source only)
+    devDependencies: meta.devDependencies || '',   // what it takes to PACKAGE this
     license: meta.license || '', sourceIncluded: true,
     systems: meta.systems || [], owner: meta.owner, selected: 'source',
     versions: (meta.versions || []).map(x => x.version).join(' '),
