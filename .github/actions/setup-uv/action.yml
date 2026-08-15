@@ -1,0 +1,77 @@
+# mv-package-registry — set up the licensed UniVerse toolchain on a self-hosted
+# runner.  Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# The UniVerse counterpart of setup-udt.  UniVerse is licensed and cannot be
+# distributed, so nothing is downloaded — but unlike the UniData builder, which
+# is built from a capture of a live install, this image is SELF-CONTAINED: it
+# installs UniVerse from its own media during the image build, so the builder
+# depends on no other machine.  The image is (re)BUILT on the runner from the
+# builder-uv/ context in THIS checkout, so a Dockerfile change is picked up
+# automatically; Docker layer caching keeps a no-change run near-instant.  The
+# one licensed piece, the install media, stays on the runner and is never in git
+# — provisioned once per runner (see builder-uv/README.md) at a stable path.
+#
+#   runs-on: [self-hosted, linux, uv]
+#   steps:
+#     - uses: actions/checkout@v5
+#     - uses: mvx-lang/mv-package-registry/.github/actions/setup-uv@main
+#     - run: uv-run 'BASIC BP MYPROG'
+#     - run: uv-run sh build-uv.sh /pkg/dist
+name: Setup UniVerse builder
+description: Build the licensed uv-builder image from the current Dockerfile on a self-hosted runner and put a `uv-run` wrapper on PATH.
+
+inputs:
+  image:
+    description: The uv-builder image tag to build/use.
+    required: false
+    default: uv-builder:14.2.1
+  media:
+    description: >-
+      Path on the runner to the licensed UniVerse install media (the
+      UVTE_LINUXX86_*.zip), kept off git and provisioned once per runner.
+      Defaults to $UV_MEDIA_ZIP, else /opt/uv-builder/UVTE_LINUXX86_14.2.1.zip.
+    required: false
+    default: ''
+
+outputs:
+  image:
+    description: The uv-builder image in effect.
+    value: ${{ steps.setup.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - id: setup
+      shell: bash
+      env:
+        UV_BUILDER_IMAGE: ${{ inputs.image }}
+        UV_MEDIA_IN: ${{ inputs.media }}
+      run: |
+        set -euo pipefail
+        command -v docker >/dev/null 2>&1 || { echo "::error::docker not found on this runner"; exit 1; }
+
+        # The builder-uv/ context lives in the registry repo (this action's
+        # repo), three levels up from .github/actions/setup-uv.
+        BUILDER="$(cd "$GITHUB_ACTION_PATH/../../../builder-uv" && pwd)"
+        [ -f "$BUILDER/Dockerfile" ] || { echo "::error::builder-uv context not found at $BUILDER"; exit 1; }
+
+        # The licensed media (never committed): input, else runner env, else default.
+        MEDIA="${UV_MEDIA_IN:-${UV_MEDIA_ZIP:-/opt/uv-builder/UVTE_LINUXX86_14.2.1.zip}}"
+        [ -f "$MEDIA" ] || {
+          echo "::error::licensed UniVerse media not found at '$MEDIA' — provision it once on this runner (see builder-uv/README.md), or set inputs.media / \$UV_MEDIA_ZIP"; exit 1; }
+
+        # Build the image from the CURRENT Dockerfile; layer cache makes an
+        # unchanged run cheap, and any Dockerfile change is picked up here — no
+        # manual rebuild.  The media is copied in under the name the Dockerfile
+        # expects, so the file on the runner may carry any version suffix.
+        cp -f "$MEDIA" "$BUILDER/UVTE_LINUXX86_14.2.1.zip"
+        docker build -t "$UV_BUILDER_IMAGE" "$BUILDER"
+
+        # Put `uv-run` on PATH and pin the image for the rest of the job.
+        BIN="$RUNNER_TEMP/uv-bin"
+        mkdir -p "$BIN"
+        install -m 0755 "$GITHUB_ACTION_PATH/uv-run" "$BIN/uv-run"
+        echo "$BIN" >> "$GITHUB_PATH"
+        echo "UV_BUILDER_IMAGE=$UV_BUILDER_IMAGE" >> "$GITHUB_ENV"
+        echo "image=$UV_BUILDER_IMAGE" >> "$GITHUB_OUTPUT"
+        echo "setup-uv: built + ready ($UV_BUILDER_IMAGE from $BUILDER)"

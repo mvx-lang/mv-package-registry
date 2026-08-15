@@ -1,0 +1,64 @@
+# mv-package-registry — build + publish a UniVerse binary release.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# Runs the licensed `uv-builder` container on a self-hosted runner to build one
+# package's UniVerse binary tar and attach it to the release.  It carries its own
+# build-release.sh, so a caller in another repo needs only to check itself out.
+#
+#   # in a package repo's release workflow, on a self-hosted udt runner:
+#   - uses: actions/checkout@v5
+#   - uses: mvx-lang/mv-package-registry/.github/actions/uv-build@main
+#     with:
+#       package: mvx-lang/git      # base -> mvx-lang_git
+#
+# The package must provide `build-uv.sh`, which — run inside the container at
+# the repo root — stages its release tree (contents at the root) into $1.
+name: Build UniVerse binary release
+description: Build one package's UniVerse binary tar in the uv-builder container and attach it to the release.
+
+inputs:
+  package:
+    description: 'Package name, e.g. "mvx-lang/git". The artifact base is this with "/" -> "_".'
+    required: true
+  image:
+    description: The uv-builder image on the runner.
+    required: false
+    default: uv-builder:14.2.1
+  repository:
+    description: 'Repo whose release to attach the asset to (owner/name); default this repo.'
+    required: false
+    default: ${{ github.repository }}
+  token:
+    description: GitHub token for the release upload.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  tarball:
+    description: The binary tarball filename.
+    value: ${{ steps.build.outputs.tarball }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up the UniVerse toolchain (puts uv-run on PATH)
+      uses: mvx-lang/mv-package-registry/.github/actions/setup-uv@main
+      with:
+        image: ${{ inputs.image }}
+
+    - id: build
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+      run: sh "$GITHUB_ACTION_PATH/build-release.sh" "$PACKAGE"
+
+    - name: Publish the UniVerse binary asset
+      uses: softprops/action-gh-release@v3
+      with:
+        token: ${{ inputs.token }}
+        repository: ${{ inputs.repository }}
+        tag_name: ${{ github.ref_name }}
+        files: |
+          ${{ steps.build.outputs.tarball }}
+          ${{ steps.build.outputs.tarball }}.sha256
+        fail_on_unmatched_files: true
