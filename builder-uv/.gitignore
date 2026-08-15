@@ -1,0 +1,5 @@
+# Licensed UniVerse media — provisioned once per runner, never committed.
+UVTE_LINUXX86_*.zip
+# Build inputs/outputs staged at runtime.
+packages/
+releases/
