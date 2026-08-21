@@ -6,11 +6,23 @@ FROM rockylinux:8
 
 # UniVerse build + runtime dependencies, plus what uv.load itself needs (cpio to
 # unpack the media components, tcsh/bc which the install scripts call).
+#
+# AND libgit2, which the udt builder has carried all along and this one did not:
+# mv_git's UniVerse half is mvgitd + uv-git, both of which compile against
+# libgit2, so without the headers the build stops at
+# "fatal error: git2.h: No such file or directory" — which is what it did the
+# first time a uv release job ran.
+#
+# EPEL's libgit2_1.7-devel, the same one the udt builder uses, so both platforms
+# link the version end users install with a plain `dnf install libgit2_1.7`.
+# Base-OS libgit2 is 0.26 and far too old.  It lands as /usr/include/git2.h with
+# a libgit2.pc, which is what build-gitd.sh looks for via pkg-config.
 RUN dnf -y install epel-release \
     && dnf -y install \
         gcc gcc-c++ make tar gzip unzip which hostname procps-ng findutils cpio \
         glibc libnsl libxcrypt ncurses-compat-libs gdbm-libs pam unixODBC \
         tcsh bc glibc-langpack-en curl sudo diffutils \
+        libgit2_1.7-devel pkgconfig \
     && dnf clean all
 
 # UV 12.1 and later require a uvdb user to exist BEFORE the install — without it
