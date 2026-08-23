@@ -30,7 +30,11 @@ command -v uv-run >/dev/null 2>&1 || {
 
 # Artifact key: native code is os+arch+endian-locked.  os = uname -s (linux);
 # arch = uname -m; endian from a two-byte dump (0201 little, 0102 big).
-BASE_NAME="$(printf '%s' "$PKG" | tr '/' '_')"
+# $ARTIFACT names the FILE when it should not be named after the package:
+# mv_git ships as `mv_git-<ver>-…` while its package identity stays
+# `mvx-lang/git`, which is what MVPKG installs by and what names callc.d
+# (mv_git#101).  Unset — every other package — keeps the derivation.
+BASE_NAME="${ARTIFACT:-$(printf '%s' "$PKG" | tr '/' '_')}"
 ARCH="$(uname -m)"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"; case "$OS" in *linux*) OS=linux ;; esac
 case "$(printf '\1\2' | od -An -tx2 | tr -d ' \n')" in
