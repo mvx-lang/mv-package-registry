@@ -78,8 +78,34 @@ and a shipped account's looks like
 ```
 
 i.e. type `F`, data = the directory, dict = `D_BP`. `CREATE.FILE BP` makes both,
-but it prompts for the **DICTionary** file first and then the data file — modulo,
-separation and file type for each — so a script has to feed six answers, with
-**type 19** (directory) for the data part. Positional forms like
-`CREATE.FILE BP 19` or `CREATE.FILE BP TYPE 19` do *not* select the type; they
-either prompt anyway or quietly create a hashed file.
+but it prompts — and the prompt count is the trap. It asks for the **DICTionary**
+file first and then the **DATA** file (modulo, separation and file type for
+each), and then a **seventh** question: a file description.
+
+```
+Please enter the following information for the DICTionary file:
+Modulo = 1   Separation = 2   File type = 3
+Please enter the following information for the DATA file:
+Modulo = 1   Separation = 2   File type = 19
+File description =            <- the seventh, and it must be left EMPTY
+```
+
+so the script feeds `1 2 3 1 2 19` and then a **blank line**:
+
+```sh
+printf 'CREATE.FILE %s\n1\n2\n3\n1\n2\n19\n\nQUIT\n' "$name" | uv
+```
+
+**Leave the description empty.** UniVerse stores it in VOC attribute 1 as
+`F <description>`, and code that reads attribute 1 as the type — an account scan
+matching `F` or `DIR` — then cannot see the file at all. It is staged nowhere,
+with no error. An earlier version of this README fed a filler word as the
+seventh answer, which is exactly how that bug reached mv_git (see mv_git#43);
+feeding `QUIT` instead is no better, as it is consumed as the description too and
+the session then runs on.
+
+Positional forms like `CREATE.FILE BP 19` or `CREATE.FILE BP TYPE 19` do *not*
+select the type; they either prompt anyway or create nothing.
+`CREATE.FILE <name> <mod>,<sep> <mod>,<sep>` is fully non-interactive and gives a
+clean `F`, but produces a **hashed** file — no good for `BP`, which must be a
+directory to hold source items.
