@@ -17,6 +17,7 @@ RUN dnf -y install epel-release \
         libgit2_1.7-devel \
         libcurl-devel \
         curl sudo \
+        git \
     && dnf clean all
 
 # match the source install's group ownership

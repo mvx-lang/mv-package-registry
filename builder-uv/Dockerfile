@@ -23,6 +23,7 @@ RUN dnf -y install epel-release \
         glibc libnsl libxcrypt ncurses-compat-libs gdbm-libs pam unixODBC \
         tcsh bc glibc-langpack-en curl sudo diffutils \
         libgit2_1.7-devel pkgconfig \
+        git \
     && dnf clean all
 
 # UV 12.1 and later require a uvdb user to exist BEFORE the install — without it
