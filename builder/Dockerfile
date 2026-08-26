@@ -30,16 +30,17 @@ RUN tar xzf /tmp/ud83.tar.gz -C / \
     && printf '/lib64\n/usr/lib64\n/usr/ud83/bin\n' > /etc/ld.so.conf.d/UniData.conf \
     && ldconfig
 
-# The captured /usr/ud83/bin/libu2callc.so was linked on the capture host against
-# a COMPILED libgit2.so.1.9; this image ships EPEL's DISTRIBUTED libgit2.so.1.7.
-# A pure-BASIC package build never rebuilds libu2callc.so, so newacct (which loads
-# it at start) would die on the missing 1.9 soname.  Point 1.9 at the distributed
-# 1.7 so it loads — the git CallC functions are never CALLED during a pure-BASIC
-# build, and a native package relinks libu2callc.so against 1.7 (LIBGIT2_LIBS)
-# before calling them.  Uses the distributed 1.7, not a compiled 1.9.
-RUN L="$(ldconfig -p | awk -F'=> ' '/libgit2\.so\.1\.7/{print $2; exit}')" \
-    && [ -n "$L" ] && ln -sf "$L" /usr/lib64/libgit2.so.1.9 && ldconfig \
-    && echo "aliased libgit2.so.1.9 -> $L (distributed EPEL 1.7)"
+# NO libgit2 SONAME ALIAS HERE, deliberately.  This used to link
+# /usr/lib64/libgit2.so.1.9 at the distributed 1.7, so the captured
+# libu2callc.so would load.  A soname encodes an ABI: pointing 1.9 at 1.7 means
+# anything resolving through it calls 1.7 with 1.9 expectations, and nothing
+# about that fails loudly.
+#
+# It was also unnecessary.  The live libu2callc.so has no libgit2 in its
+# DT_NEEDED at all; the only files wanting 1.9 are the dead capture leftovers
+# libu2callc.so.prev and libu2callc.so.pre-curses, which nothing loads.  With
+# the link removed, a udt session starts and newacct -- the thing the old
+# comment said would die -- loads and runs.
 
 # UniData network daemon port
 RUN printf 'udt_os\t1382/tcp\nudt_os\t1382/udp\n' >> /etc/services
