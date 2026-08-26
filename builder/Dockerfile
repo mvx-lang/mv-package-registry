@@ -42,6 +42,19 @@ RUN tar xzf /tmp/ud83.tar.gz -C / \
 # the link removed, a udt session starts and newacct -- the thing the old
 # comment said would die -- loads and runs.
 
+# NO PRE-INSTALLED PACKAGE CallC FRAGMENTS.  The capture carried
+# /usr/ud83/callc.d/git -- prebuilt gitcallcb.o / mvxgit.o / udtgit_rt.o from
+# the capture host, under mv_git's PRE-RENAME package name.  mv_git installs as
+# `mvx-lang_git`, so both stage the same object names, and udt-callc resolves
+# the clash by keeping `git`: libu2callc.so -- what the in-session GIT verb
+# calls through -- was assembled from the CAPTURED objects, not the ones just
+# built.  Every suite run in this image tested a month-old engine while the
+# install reported success (mv_git#163).
+#
+# callc.d is per-site package state, not part of the licensed install: anything
+# that needs a fragment reinstalls it.  capture-install.sh should exclude it too.
+RUN rm -rf /usr/ud83/callc.d/git
+
 # UniData network daemon port
 RUN printf 'udt_os\t1382/tcp\nudt_os\t1382/udp\n' >> /etc/services
 
