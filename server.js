@@ -676,11 +676,21 @@ function mergeVersion(pkg, v) {
 // `<base>-<ver>-<suffix>.tar.gz` (base = name '/'->'_'); suffix "source" or a
 // 4-part "<system>-<os>-<arch>-<endian>" binary key.
 function artifactsFromRelease(pkg, rel) {
-  const prefix = `${pkg.name.replace(/\//g, '_')}-${rel.version}-`;
+  // A package may publish its artifacts under a name of its own, declared as
+  // "artifact" in mvpkg.json.  mv_git is the case that forced this: the package
+  // is mvx-lang/git but the tool -- and the thing you unpack and cd into -- is
+  // mv_git, so its tarballs are named mv_git-<ver>-... (mv_git#101).  Keying
+  // ONLY on the package name meant those were not recognised as artifacts at
+  // all: they uploaded fine, indexed as nothing, and every install quietly fell
+  // through to the source tarball.  Nothing errored, which is why it lasted.
+  const bases = [pkg.name.replace(/\//g, '_')];
+  if (pkg.artifact && !bases.includes(pkg.artifact)) bases.push(pkg.artifact);
   const arts = [];
   for (const asset of (rel.assets || [])) {
     const an = asset.name || '';
-    if (!asset.url || !an.endsWith('.tar.gz') || !an.startsWith(prefix)) continue;
+    if (!asset.url || !an.endsWith('.tar.gz')) continue;
+    const prefix = bases.map(b => `${b}-${rel.version}-`).find(px => an.startsWith(px));
+    if (!prefix) continue;
     const suffix = an.slice(prefix.length, -'.tar.gz'.length);
     if (suffix === 'source') arts.push({ kind: 'source', tarball: asset.url, external: true });
     else {
@@ -763,6 +773,9 @@ function addPackage(user, source, pkgOverride, cb) {
         provides: Array.isArray(j.provides) ? j.provides.join(' ') : (j.provides || ''),
         clibs: Array.isArray(j.clibs) ? j.clibs.join(' ') : (j.clibs || ''),
         shell: Array.isArray(j.shell) ? j.shell.join(' ') : (j.shell || ''),
+        // The base its release assets are named with, when that is not the
+        // package name -- see artifactsFromRelease.
+        artifact: typeof j.artifact === 'string' ? j.artifact.trim() : '',
         systems: Array.isArray(j.systems) ? j.systems : [] };
     } catch {} }
     if (!name || !okName(name))
@@ -783,6 +796,7 @@ function addPackage(user, source, pkgOverride, cb) {
     if (man.provides !== undefined) meta.provides = man.provides;
     if (man.clibs !== undefined) meta.clibs = man.clibs;
     if (man.shell !== undefined) meta.shell = man.shell;
+    if (man.artifact !== undefined) meta.artifact = man.artifact;
     if (man.systems && man.systems.length) meta.systems = [...new Set([...(meta.systems || []), ...man.systems])];
     meta.tracking = meta.tracking || { id: crypto.randomBytes(6).toString('hex'), secret: crypto.randomBytes(24).toString('base64url'), hookId: null, latest: null };
     meta.tracking.provider = provider.name;
@@ -1282,6 +1296,8 @@ function refreshMeta(pkg, cb) {
       if (clibs !== (fresh.clibs || '')) { fresh.clibs = clibs; changed = true; }
       const shell = Array.isArray(j.shell) ? j.shell.join(' ') : (j.shell || '');
       if (shell !== (fresh.shell || '')) { fresh.shell = shell; changed = true; }
+      const artbase = typeof j.artifact === 'string' ? j.artifact.trim() : '';
+      if (artbase !== (fresh.artifact || '')) { fresh.artifact = artbase; changed = true; }
       if (Array.isArray(j.systems) && j.systems.length) {
         const sys = [...new Set([...(fresh.systems || []), ...j.systems])];   // additive (binaries also add systems)
         if (sys.length !== (fresh.systems || []).length) { fresh.systems = sys; changed = true; }
