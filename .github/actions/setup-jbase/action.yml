@@ -1,0 +1,50 @@
+# mv-package-registry — put the licensed jBASE builder on PATH.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# The counterpart to setup-uv / setup-udt, and deliberately smaller than either:
+# the jbase-builder image is BUILT ONCE on the runner from media that cannot be
+# shipped, so there is nothing to build here -- this only checks the image is
+# present and puts the `jbase-run` wrapper on PATH.
+#
+#   steps:
+#     - uses: actions/checkout@v5
+#     - uses: mvx-lang/mv-package-registry/.github/actions/setup-jbase@main
+#     - run: jbase-run 'sh build-jbase.sh /pkg/dist'
+#
+# A missing image is an error rather than a silent skip: a release that quietly
+# publishes no jBASE artifact looks exactly like one that has none to publish.
+name: Setup jBASE builder
+description: Check the licensed jbase-builder image is present and put a `jbase-run` wrapper on PATH.
+
+inputs:
+  image:
+    description: The jbase-builder image on the runner.
+    required: false
+    default: jbase-builder:6.2.1.1
+
+outputs:
+  image:
+    description: The jbase-builder image in effect.
+    value: ${{ steps.setup.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - id: setup
+      shell: bash
+      env:
+        JBASE_BUILDER_IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        img="$JBASE_BUILDER_IMAGE"
+        docker image inspect "$img" >/dev/null 2>&1 || {
+          echo "::error::jbase-builder image '$img' is not on this runner."
+          echo "::error::It is built once per runner from licensed media that cannot be shipped."
+          exit 1
+        }
+        mkdir -p "$HOME/.local/bin"
+        install -m 0755 "$GITHUB_ACTION_PATH/jbase-run" "$HOME/.local/bin/jbase-run"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        echo "JBASE_BUILDER_IMAGE=$img" >> "$GITHUB_ENV"
+        echo "image=$img" >> "$GITHUB_OUTPUT"
+        echo "setup-jbase: $img, jbase-run on PATH"

@@ -1,0 +1,70 @@
+# mv-package-registry — build + publish a jBASE binary release.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# The jBASE counterpart of uv-build, same shape and same contract, so a package
+# adds a jBASE artifact with the same four lines it added a UniVerse one:
+#
+#   - uses: actions/checkout@v5
+#   - uses: mvx-lang/mv-package-registry/.github/actions/jbase-build@main
+#     with:
+#       package: mvx-lang/git
+#
+# The package must provide `build-jbase.sh`, which -- run inside the container
+# at the repo root -- stages its release tree into $1.
+name: Build jBASE binary release
+description: Build one package's jBASE binary tar in the jbase-builder container and attach it to the release.
+
+inputs:
+  package:
+    description: 'Package name, e.g. "mvx-lang/git". The artifact base is this with "/" -> "_".'
+    required: true
+  artifact:
+    description: |
+      Artifact base name, when the file should not be named after the package.
+      Defaults to the package with "/" -> "_" — mv_git ships as `mv_git-<ver>-…`
+      while its package identity stays `mvx-lang/git` (mv_git#101).
+    required: false
+    default: ''
+  image:
+    description: The jbase-builder image on the runner.
+    required: false
+    default: jbase-builder:6.2.1.1
+  repository:
+    description: 'Repo whose release to attach the asset to (owner/name); default this repo.'
+    required: false
+    default: ${{ github.repository }}
+  token:
+    description: GitHub token for the release upload.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  tarball:
+    description: The binary tarball filename.
+    value: ${{ steps.build.outputs.tarball }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up the jBASE toolchain (puts jbase-run on PATH)
+      uses: mvx-lang/mv-package-registry/.github/actions/setup-jbase@main
+      with:
+        image: ${{ inputs.image }}
+
+    - id: build
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        ARTIFACT: ${{ inputs.artifact }}
+      run: sh "$GITHUB_ACTION_PATH/build-release.sh" "$PACKAGE"
+
+    - name: Publish the jBASE binary asset
+      uses: softprops/action-gh-release@v3
+      with:
+        token: ${{ inputs.token }}
+        repository: ${{ inputs.repository }}
+        tag_name: ${{ github.ref_name }}
+        files: |
+          ${{ steps.build.outputs.tarball }}
+          ${{ steps.build.outputs.tarball }}.sha256
+        fail_on_unmatched_files: true
