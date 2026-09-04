@@ -60,11 +60,11 @@ export DEVDEPS
 
 # Build + stage inside the licensed container (jbase-run mounts . at /pkg and
 # chowns anything root created back to the runner user).  The build deps are
-# satisfied in the SAME container: uv-run starts a fresh `docker run --rm` per
-# invocation, so anything installed in a separate one would be thrown away.
-uv-run '
+# satisfied in the SAME container: jbase-run starts a fresh `docker run --rm`
+# per invocation, so anything installed in a separate one would be thrown away.
+jbase-run '
 for d in '"$DEVDEPS"'; do
-  echo "build-release: build dependency $d is declared but not installable on UniVerse yet (mvpkg is not ported)"
+  echo "build-release: build dependency $d declared; build-jbase.sh must provide it"
 done
 rm -rf dist && mkdir -p dist && sh build-jbase.sh /pkg/dist'
 [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ] || {
