@@ -113,11 +113,33 @@ function loadPackage(name) {
 // renamed mvx-lang/cursors declares "provides": ["udt_curses"], and a request
 // for the old name serves cursors — the client installs it and the dependency
 // on udt_curses is met.
-function findProvider(name) {
-  for (const p of loadPackages()) {
-    if (String(p.provides || '').trim().split(/\s+/).includes(name)) return p;
-  }
-  return null;
+//
+// WHICH provider matters once more than one satisfies a name.  `curl` is
+// provided by curl-cmd (the OS curl command — udt, uv, jbase) and by curl
+// (libcurl through CallC/DEFC — udt and jbase only, since UniVerse has no
+// in-process route to C at all).  Taking the first match regardless of who is
+// asking handed UniVerse the libcurl one and never considered the provider that
+// does support it: nothing errored, the client simply got a package it could
+// not install (#32).
+//
+// So the requesting platform decides, preferring in order: a provider that
+// declares this system AND has a binary for this machine, then one that
+// declares the system at all, then — so a request that resolves today still
+// resolves — whatever provides the name.  loadPackages() is name-sorted, so
+// equal candidates tie-break deterministically rather than by directory order.
+function findProvider(name, system, os, arch, endian) {
+  const provs = loadPackages().filter(p =>
+    String(p.provides || '').trim().split(/\s+/).includes(name));
+  if (!provs.length) return null;
+  if (!system) return provs[0];
+  const declares = (p) => (Array.isArray(p.systems) ? p.systems
+                          : String(p.systems || '').trim().split(/\s+/)).includes(system);
+  const usable = provs.filter(declares);
+  // selectArtifact holds the eligibility rules for a binary; ask it rather than
+  // re-deriving them here, so the two cannot drift.
+  const withBinary = usable.find(p =>
+    selectArtifact(p, system, os, arch, endian).selected === 'binary');
+  return withBinary || usable[0] || provs[0];
 }
 function savePackage(meta) {
   fs.mkdirSync(path.join(REGDIR, meta.name), { recursive: true });
@@ -1241,7 +1263,9 @@ const server = http.createServer((req, res) => {
   if (parts[0] === 'package' && parts[1]) {
     const nm = parts.slice(1).join('/');               // scoped: /package/<scope>/<name>
     if (!okName(nm)) return sendJSON(res, 404, { error: 'not found' });
-    const meta = loadPackage(nm) || findProvider(nm);  // real package, else a provider
+    // real package, else a provider — chosen for the platform that is asking
+    const meta = loadPackage(nm)
+      || findProvider(nm, u.query.system, u.query.os, u.query.arch, u.query.endian);
     if (!meta) return sendJSON(res, 404, { error: 'not found' });
     // ?version=<exact> -> that version (for a client resolving a constraint);
     // else the latest.  Both carry the `versions` list and ?system=&arch=
