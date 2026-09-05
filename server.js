@@ -760,10 +760,38 @@ function ghAppPage(user, opts) {
 
 // Record a version in the package's release history (newest first, deduped by
 // version).  Keeps a bounded, source-of-truth list for the "Versions" sidebar.
+// A version keeps its OWN artifacts and its own pre-release flag.  Without them
+// resolveExactVersion could only guess a URL for anything but the current
+// version -- and guessed it from the package name, so every package that
+// renamed its artifacts served a 404 for its whole history (#41).
+// Record each listed release's own artifacts onto its version entry.  Shared by
+// the add and refresh paths, because both fetch the same history and both used
+// to keep only the tag -- which is what left every version but the current one
+// resolving to a guessed URL (#41).  A tag with no recognisable assets records
+// none and keeps whatever was already known.
+function indexVersionArtifacts(pkg, vers) {
+  let n = 0;
+  for (const v of vers) {
+    const arts = artifactsFromRelease(pkg, { version: v.version, assets: v.assets || [] });
+    if (arts.length) n++;
+    mergeVersion(pkg, { ...v, artifacts: arts.length ? arts : undefined });
+  }
+  return n;
+}
+
 function mergeVersion(pkg, v) {
   if (!v || !v.version) return;
+  const prev = (pkg.versions || []).find(x => x.version === v.version);
   pkg.versions = (pkg.versions || []).filter(x => x.version !== v.version);
-  pkg.versions.unshift({ version: v.version, tag: v.tag || null, at: v.at || null, html: v.html || null });
+  const rec = { version: v.version, tag: v.tag || null, at: v.at || null, html: v.html || null };
+  // Keep what we already knew when this call does not carry it: listVersions
+  // reports tags with no assets, and must not erase artifacts an indexing pass
+  // recorded.
+  const arts = v.artifacts || (prev && prev.artifacts);
+  if (arts && arts.length) rec.artifacts = arts;
+  if (v.prerelease !== undefined) rec.prerelease = !!v.prerelease;
+  else if (prev && prev.prerelease !== undefined) rec.prerelease = prev.prerelease;
+  pkg.versions.unshift(rec);
   // Newest-first by semver precedence (pre-releases rank below their release),
   // which is the order the client walks to pick the newest version satisfying a
   // dependency constraint; fall back to date when versions compare equal.
@@ -838,7 +866,8 @@ function indexRelease(pkg, rel) {
   // tracking.latest records the newest release SEEN (any channel), which is what
   // drives push-tracking freshness — distinct from the stable default above.
   if (pkg.tracking) pkg.tracking.latest = { version, tag: rel.tag, at: rel.at, html: rel.html, seenAt: Date.now() };
-  mergeVersion(pkg, { version, tag: rel.tag, at: rel.at, html: rel.html });
+  mergeVersion(pkg, { version, tag: rel.tag, at: rel.at, html: rel.html,
+                      artifacts: arts, prerelease: rel.prerelease });
   savePackage(pkg);
   return arts.length;
 }
@@ -945,7 +974,7 @@ function addPackage(user, source, pkgOverride, cb) {
       provider.listVersions(ref, (er, vers) => {
         if (!er && vers && vers.length) {
           const fresh = loadPackage(name) || meta;
-          vers.forEach(v => mergeVersion(fresh, v));
+          indexVersionArtifacts(fresh, vers);
           savePackage(fresh);
         }
         next();
@@ -1068,7 +1097,26 @@ function resolveExactVersion(meta, version, system, os, arch, endian) {
     return selectArtifact(meta, system, os, arch, endian);
   const v = (meta.versions || []).find(x => x.version === version);
   if (!v) return null;
-  const base = meta.name.replace(/\//g, '_');
+  // WHAT WAS RECORDED, if anything was.  A version indexed with its assets is
+  // served exactly like the current one -- same artifact selection, so an older
+  // release can offer a binary for this machine rather than only source.
+  if (v.artifacts && v.artifacts.length) {
+    // THE FALLBACK TARBALL HAS TO BE THIS VERSION'S TOO.  selectArtifact only
+    // consults the artifact list when a system is given, and otherwise hands
+    // back meta.tarball -- which belongs to the CURRENT version.  Asking for a
+    // beta with no system would then have answered with the stable's tarball
+    // under the beta's version number.
+    const src = v.artifacts.find(a => a.kind === 'source') || v.artifacts[0];
+    const view = selectArtifact({ ...meta, version, artifacts: v.artifacts, tarball: src.tarball },
+                                system, os, arch, endian);
+    view.versions = (meta.versions || []).map(x => x.version).join(' ');
+    return view;
+  }
+  // Otherwise the old guess, kept for versions indexed before artifacts were
+  // recorded per version.  It assumes the pre-rename asset naming and a source
+  // tarball, and is wrong whenever the package declares an `artifact` name --
+  // which is why a refresh, which now records them, is the real answer.
+  const base = meta.artifact || meta.name.replace(/\//g, '_');
   const tarball = `${meta.source}/releases/download/${v.tag || version}/${base}-${version}-source.tar.gz`;
   return {
     name: meta.name, version, tarball,
@@ -1502,10 +1550,18 @@ function refreshPackage(pkg, cb) {
         const f2 = loadPackage(pkg.name);
         if (f2) refreshDownloads(f2, rel);
       }
-      if (!pkg.versions && prov.listVersions) return prov.listVersions(ref, (e2, vers) => {
+      // ALWAYS, not only when the history is empty.  Each release carries its own
+      // assets now, and recording them is what lets an older version resolve to a
+      // real URL -- and to a binary for this machine -- rather than a guess.  It
+      // is the same one API call that used to backfill the tag list.
+      if (prov.listVersions) return prov.listVersions(ref, (e2, vers) => {
         if (!e2 && vers && vers.length) {
           const f2 = loadPackage(pkg.name);
-          if (f2) { vers.forEach(v => mergeVersion(f2, v)); savePackage(f2); }
+          if (f2) {
+            const n = indexVersionArtifacts(f2, vers);
+            savePackage(f2);
+            if (n) console.log(`refresh: ${pkg.name} indexed artifacts for ${n} version(s)`);
+          }
         }
         cb();
       });
