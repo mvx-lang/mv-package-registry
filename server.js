@@ -141,6 +141,78 @@ function findProvider(name, system, os, arch, endian) {
     selectArtifact(p, system, os, arch, endian).selected === 'binary');
   return withBinary || usable[0] || provs[0];
 }
+// ---- install events (#35) --------------------------------------------------
+//
+// MVPKG reports a package being installed, updated or removed on a machine, so
+// the registry can answer how many installations a package has and what
+// environments they are on.
+//
+// SYSTEM-WIDE, NOT PER-ACCOUNT.  The client keeps two inventories: the system
+// store, which is what a machine has, and the per-account lock, which is what an
+// account deploys.  These events belong to the first, so deploying a package
+// that is already installed into a second account is not a second installation.
+//
+// INSERT-ONLY, one JSON object per line.  Appending needs no read-modify-write,
+// so two installs finishing together cannot lose each other's event, and the
+// history is kept -- which is the part that makes a trend answerable later.
+// Aggregating on read is fine at this size; when it is not, compaction rolls
+// old lines into a summary beside the log and this code reads both.  That is a
+// separate job precisely because it should not be on the write path.
+const EVLOG = 'installs.jsonl';
+const EV_ACTIONS = ['install', 'update', 'remove'];
+// Deliberately narrow: everything stored here arrives unauthenticated, so each
+// field is checked for shape and length rather than trusted.  A field that does
+// not fit is dropped, not stored badly.
+const evField = (v, max) => {
+  const t = String(v == null ? '' : v).trim();
+  return (t && t.length <= max && /^[A-Za-z0-9._+:\/-]+$/.test(t)) ? t : '';
+};
+function appendInstallEvent(name, body) {
+  const action = evField(body.action, 16);
+  if (!EV_ACTIONS.includes(action)) return { error: 'bad action' };
+  const id = evField(body.id, 64);
+  if (!id) return { error: 'bad id' };
+  const ev = {
+    t: Math.floor(Date.now() / 1000),
+    id,
+    action,
+    version: evField(body.version, 64),
+    from: evField(body.from, 64),           // update: the version moved from
+    system: evField(body.system, 16),
+    os: evField(body.os, 24),
+    arch: evField(body.arch, 24),
+    endian: evField(body.endian, 8),
+  };
+  const dir = path.join(REGDIR, ...name.split('/'));
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, EVLOG), JSON.stringify(ev) + '\n');
+  } catch (e) { return { error: 'cannot record' }; }
+  return { ok: true, recorded: ev.action };
+}
+// Aggregate the log: how many installations, and what they are running on.  A
+// `remove` retires that id, so the counts are of what is installed NOW while the
+// log still remembers everything that happened.
+function installStats(name) {
+  const f = path.join(REGDIR, ...name.split('/'), EVLOG);
+  let lines = [];
+  try { lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean); } catch { return null; }
+  const cur = new Map();
+  let events = 0;
+  for (const ln of lines) {
+    let ev; try { ev = JSON.parse(ln); } catch { continue; }
+    if (!ev || !ev.id) continue;
+    events++;
+    if (ev.action === 'remove') cur.delete(ev.id); else cur.set(ev.id, ev);
+  }
+  const bump = (o, k) => { if (k) o[k] = (o[k] || 0) + 1; };
+  const bySystem = {}, byVersion = {}, byArch = {};
+  for (const ev of cur.values()) {
+    bump(bySystem, ev.system); bump(byVersion, ev.version); bump(byArch, ev.arch);
+  }
+  return { name, installations: cur.size, events, bySystem, byVersion, byArch };
+}
+
 function savePackage(meta) {
   fs.mkdirSync(path.join(REGDIR, meta.name), { recursive: true });
   fs.writeFileSync(path.join(REGDIR, meta.name, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
@@ -1002,6 +1074,26 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST') {
     return readBody(req, buf => {
+      // MVPKG reporting an install / update / remove.  UNAUTHENTICATED, and it
+      // has to be: every installation in the world would otherwise need a
+      // token.  So the package must already exist -- an unknown name is
+      // rejected rather than quietly creating a log for it -- and every field
+      // is validated for shape and length before anything is written.  The
+      // counts this produces are indicative, and should be read as such.
+      if (parts[0] === 'installs' && parts[1]) {
+        const nm = parts.slice(1).join('/');
+        if (!okName(nm)) return sendJSON(res, 400, { error: 'bad name' });
+        if (!loadPackage(nm) && !findProvider(nm)) return sendJSON(res, 404, { error: 'not found' });
+        let body; try { body = JSON.parse(buf.toString('utf8') || '{}'); }
+        catch { return sendJSON(res, 400, { error: 'bad json' }); }
+        // A provider is recorded against ITS OWN name, not the virtual one the
+        // client happened to ask for, so two names never split one package's
+        // count.
+        const real = (loadPackage(nm) || findProvider(nm)).name;
+        const r = appendInstallEvent(real, body);
+        return r.error ? sendJSON(res, 400, r) : sendJSON(res, 200, r);
+      }
+
       // Provider push (release webhook) — the URL carries the package's
       // tracking id; the provider verifies the signature and parses the event.
       if (parts[0] === 'webhook' && parts[1]) {
@@ -1257,6 +1349,17 @@ const server = http.createServer((req, res) => {
     if (!okName(nm)) { res.writeHead(400); return res.end('bad name'); }
     const html = pkgPage(nm, user);
     return html ? sendHTML(res, 200, html) : sendHTML(res, 404, page('not found', '<div class="empty">No such package.</div>', user));
+  }
+
+  // How many installations, and what they run on.
+  if (parts[0] === 'installs' && parts[1]) {
+    const nm = parts.slice(1).join('/');
+    if (!okName(nm)) return sendJSON(res, 404, { error: 'not found' });
+    const meta = loadPackage(nm) || findProvider(nm);
+    if (!meta) return sendJSON(res, 404, { error: 'not found' });
+    const st = installStats(meta.name);
+    return sendJSON(res, 200, st || { name: meta.name, installations: 0, events: 0,
+                                      bySystem: {}, byVersion: {}, byArch: {} });
   }
 
   // JSON API
