@@ -572,9 +572,15 @@ function pkgPage(name, user) {
   const binaryOnly = p.artifacts && p.artifacts.length && !hasSource;
   const distribution = binaryOnly ? 'binary only' : (hasBinary ? 'source + binary' : 'source');
   const isDev = p.artifacts && p.artifacts.some(a => a.dev);
+  // Each artifact carries what the provider says it has been downloaded, so the
+  // count sits on the link it belongs to rather than as one number that says
+  // nothing about WHICH platform people are pulling.  A dash when it is zero:
+  // "0" reads as a measurement and this is more often "not counted yet".
+  const dlCount = n => n > 0 ? ` <span class="meta">&middot; ${n.toLocaleString('en')}</span>` : '';
   const downloads = (p.artifacts && p.artifacts.length)
-    ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>`).join('')
+    ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>${dlCount(a.downloads || 0)}`).join('')
     : '<span class="meta">none yet</span>';
+  const dlTotal = (p.artifacts || []).reduce((n, a) => n + (a.downloads || 0), 0);
 
   // The git repository home: for a git-hosted package the provider maps its
   // tracking ref back to the repo URL (github/gitlab).  Distinct from p.source,
@@ -622,7 +628,7 @@ function pkgPage(name, user) {
       ${repoUrl ? `<div class="box"><h4>Repository</h4><a href="${esc(repoUrl)}">${esc(repoHost)}</a></div>` : ''}
       ${p.source && p.source !== repoUrl ? `<div class="box"><h4>Source</h4><a href="${esc(p.source)}">${esc(p.source.replace(/^https?:\/\//, ''))}</a></div>` : ''}
       <div class="box"><h4>Versions</h4>${versHtml}</div>
-      <div class="box"><h4>Downloads</h4>${downloads}</div>
+      <div class="box"><h4>Downloads${dlTotal ? ` <span class="meta">&middot; ${dlTotal.toLocaleString('en')} for ${esc(p.version)}</span>` : ''}</h4>${downloads}</div>
     </aside>`;
 
   return page(`${p.name} — mv_package`, `<div class="pkg">${main}${side}</div>`, user, true);
@@ -786,10 +792,14 @@ function artifactsFromRelease(pkg, rel) {
     const prefix = bases.map(b => `${b}-${rel.version}-`).find(px => an.startsWith(px));
     if (!prefix) continue;
     const suffix = an.slice(prefix.length, -'.tar.gz'.length);
-    if (suffix === 'source') arts.push({ kind: 'source', tarball: asset.url, external: true });
+    // Only real package assets count: the .sha256 beside each one is filtered
+    // out by the .tar.gz test above, which is what keeps a checksum fetch from
+    // reading as a download.
+    const dl = asset.downloads || 0;
+    if (suffix === 'source') arts.push({ kind: 'source', tarball: asset.url, external: true, downloads: dl });
     else {
       const p = suffix.split('-');
-      if (p.length === 4) arts.push({ kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3], tarball: asset.url, external: true });
+      if (p.length === 4) arts.push({ kind: 'binary', system: p[0], os: p[1], arch: p[2], endian: p[3], tarball: asset.url, external: true, downloads: dl });
     }
   }
   return arts;
@@ -807,6 +817,10 @@ function indexRelease(pkg, rel) {
   const arts = artifactsFromRelease(pkg, rel);
   if (!arts.length) return 0;                          // nothing recognisable in this release
   const promote = semver.shouldPromote(pkg.version, version); // default only if stable-newest
+  // The key is the asset SET, deliberately without the counts: a download
+  // changes them constantly and re-writing the package file on every refresh
+  // for that alone would be churn.  Counts ride along whenever the set is
+  // written, and `refreshDownloads` below updates them on their own.
   const key = a => a.map(x => x.tarball).sort().join('|');
   const known = (pkg.versions || []).some(x => x.version === version);
   const artsSame = pkg.version === version && key(pkg.artifacts || []) === key(arts);
@@ -827,6 +841,23 @@ function indexRelease(pkg, rel) {
   mergeVersion(pkg, { version, tag: rel.tag, at: rel.at, html: rel.html });
   savePackage(pkg);
   return arts.length;
+}
+
+// Update just the download counts on the artifacts already indexed, from the
+// same release.  Separate from indexRelease because counts move constantly and
+// the artifact set does not: keying re-index on the counts would rewrite every
+// package file on every refresh, for a number nothing depends on.
+function refreshDownloads(pkg, rel) {
+  if (!pkg.artifacts || !pkg.artifacts.length || !rel || !rel.assets) return 0;
+  const byUrl = new Map(rel.assets.map(a => [a.url, a.downloads || 0]));
+  let changed = 0;
+  for (const a of pkg.artifacts) {
+    if (!byUrl.has(a.tarball)) continue;
+    const n = byUrl.get(a.tarball);
+    if ((a.downloads || 0) !== n) { a.downloads = n; changed++; }
+  }
+  if (changed) { pkg.updated = Date.now(); savePackage(pkg); }
+  return changed;
 }
 
 // Index a "dev" version — the source of the default branch — for a package
@@ -1008,6 +1039,13 @@ function selectArtifact(meta, system, os, arch, endian) {
     devDependencies: meta.devDependencies || '',   // what it takes to PACKAGE this
     license: meta.license || '', sourceIncluded,
     systems: meta.systems || [], owner: meta.owner, selected,
+    // Downloads of the INDEXED release, from the provider -- see artifactsFromRelease.
+    downloads: (meta.artifacts || []).reduce((n, a) => n + (a.downloads || 0), 0),
+    downloadsBy: (meta.artifacts || []).reduce((o, a) => {
+      const k = a.kind === 'source' ? 'source' : (a.system || 'binary');
+      if (a.downloads) o[k] = (o[k] || 0) + a.downloads;
+      return o;
+    }, {}),
     versions: (meta.versions || []).map(v => v.version).join(' '),
     provides: meta.provides || '',
     clibs: meta.clibs || '',                   // OS C libraries the CallC needs
@@ -1458,6 +1496,11 @@ function refreshPackage(pkg, cb) {
       if (!e && rel && rel.version) {
         const fresh = loadPackage(pkg.name);
         if (fresh) { const n = indexRelease(fresh, rel); if (n) console.log(`refresh: ${pkg.name} -> ${rel.tag} (indexed ${n})`); }
+        // indexRelease rewrites only when the asset SET changed, so a package
+        // whose artifacts are unchanged would never pick up a new count.  This
+        // is the other half: same release, new numbers.
+        const f2 = loadPackage(pkg.name);
+        if (f2) refreshDownloads(f2, rel);
       }
       if (!pkg.versions && prov.listVersions) return prov.listVersions(ref, (e2, vers) => {
         if (!e2 && vers && vers.length) {
