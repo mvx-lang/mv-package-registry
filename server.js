@@ -451,7 +451,9 @@ footer{color:var(--mut);font-size:12px;border-top:1px solid var(--line);margin-t
 .pkg-side .row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}
 .pkg-side .row:first-child{border-top:0}
 .pkg-side .row .k{color:var(--mut);white-space:nowrap}.pkg-side .row .val{text-align:right;word-break:break-word}
-.pkg-side .dl{display:block;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}.pkg-side .dl:first-child{border-top:0}
+.pkg-side .dlrow{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--line)}.pkg-side .dlrow:first-child{border-top:0}
+.pkg-side .dl{font-size:13px}
+.pkg-side .dlnum{flex:none;font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
 .pkg-side .box a{word-break:break-all}
 .cmds{display:flex;flex-wrap:wrap;gap:5px}
 .cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--code);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--fg)}
@@ -576,9 +578,12 @@ function pkgPage(name, user) {
   // count sits on the link it belongs to rather than as one number that says
   // nothing about WHICH platform people are pulling.  A dash when it is zero:
   // "0" reads as a measurement and this is more often "not counted yet".
-  const dlCount = n => n > 0 ? ` <span class="meta">&middot; ${n.toLocaleString('en')}</span>` : '';
+  // The count belongs to the artifact ON ITS LINE.  It used to trail the anchor,
+  // which is display:block -- so it wrapped underneath and read as a label for
+  // the artifact BELOW it, with no way to tell which row a number counted.
+  const dlCount = n => n > 0 ? `<span class="dlnum">${n.toLocaleString('en')}</span>` : '';
   const downloads = (p.artifacts && p.artifacts.length)
-    ? p.artifacts.map(a => `<a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>${dlCount(a.downloads || 0)}`).join('')
+    ? p.artifacts.map(a => `<div class="dlrow"><a class="dl" href="${esc(a.tarball)}">${esc(a.kind === 'binary' ? artLabel(a) : (a.dev ? 'source (dev branch)' : 'source'))} &darr;</a>${dlCount(a.downloads || 0)}</div>`).join('')
     : '<span class="meta">none yet</span>';
   const dlTotal = (p.artifacts || []).reduce((n, a) => n + (a.downloads || 0), 0);
 
