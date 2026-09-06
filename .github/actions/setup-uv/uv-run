@@ -23,10 +23,17 @@ export UV_RUN_CMD
 # --hostname universe matches the install (belt and braces against any host
 # binding in the licence).  --shm-size gives UniVerse's shared memory room — a
 # build that runs uv (mkaccount/BASIC) needs it; harmless otherwise.
-# GITHUB_REF_NAME is forwarded so a build script can stamp the version.
+# GITHUB_REF_NAME is forwarded so a build script can stamp the version, and
+# GITHUB_REF_TYPE with it: A NAME ALONE CANNOT SAY WHETHER IT IS A VERSION.
+# $GITHUB_REF_NAME is set on every Actions run, so a build that trusts it stamps
+# itself "main" on a branch push and "216/merge" on a pull request -- which is
+# what mv_git shipped until it started asking the type instead (mv_git#218).
+# Forward the type and the answer is decidable inside the container too;
+# without it the build has a name it must not trust and falls back to "0".
 exec docker run --rm --hostname universe --shm-size="${UV_SHM_SIZE:-256m}" \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   -e GITHUB_REF_NAME="${GITHUB_REF_NAME:-}" \
+  -e GITHUB_REF_TYPE="${GITHUB_REF_TYPE:-}" \
   -e UV_RUN_CMD \
   -v "$PWD":/pkg -w /pkg "$IMAGE" \
   bash -lc 'rc=0; eval "$UV_RUN_CMD" || rc=$?; chown -R "$HOST_UID:$HOST_GID" . 2>/dev/null || true; exit $rc'
