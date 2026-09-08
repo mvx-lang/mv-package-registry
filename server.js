@@ -855,11 +855,24 @@ function indexRelease(pkg, rel) {
   // for that alone would be churn.  Counts ride along whenever the set is
   // written, and `refreshDownloads` below updates them on their own.
   const key = a => a.map(x => x.tarball).sort().join('|');
-  const known = (pkg.versions || []).some(x => x.version === version);
+  const prev = (pkg.versions || []).find(x => x.version === version);
+  const known = !!prev;
   const artsSame = pkg.version === version && key(pkg.artifacts || []) === key(arts);
-  // Idempotent: nothing new to record and no promotion (or the promoted set is
-  // already current) means this webhook/refresh is a no-op.
-  if (known && (!promote || artsSame)) return 0;
+  // The version's OWN recorded set, which is what this release event is about.
+  // Testing only `artsSame` -- the PROMOTED default's set -- meant a version that
+  // does not promote was never re-indexed: `promote` is false for every
+  // pre-release by design (semver.shouldPromote), and for any superseded stable,
+  // so `known && !promote` short-circuited and the condition collapsed to
+  // `if (known) return 0` (#52).  A release is routinely created before its
+  // per-system binaries finish uploading -- GitHub fires `published` with the
+  // source asset alone and the binaries arrive later as `edited` -- so those
+  // versions kept a source-only artifact list forever, and
+  // `MVPKG install <pkg>@rc` fell through to the source tarball on a machine
+  // that had a binary published.
+  const verSame = known && key(prev.artifacts || []) === key(arts);
+  // Idempotent: nothing new to record for this version, and no promotion (or the
+  // promoted set is already current), means this webhook/refresh is a no-op.
+  if (known && verSame && (!promote || artsSame)) return 0;
   if (promote) {
     pkg.version = version;
     pkg.artifacts = arts;
