@@ -16,21 +16,31 @@ only has to deliver **both hostnames to the same container**.
 | Registry backend | `192.168.15.35:8086` (VM105) |
 | Cert resolver | `cloudflare`, DNS-01, token in `CF_DNS_API_TOKEN` |
 | DNS | both zones on Cloudflare (`jake`/`lisa.ns.cloudflare.com`) |
-| `mv-package.heydon.io` | A → `192.168.15.2`, **DNS-only** (a private address, so it cannot be proxied) |
+| `mv-package.heydon.io` (public, Cloudflare) | A → `157.211.20.183`, **DNS-only**, TTL auto |
+| `mv-package.heydon.io` (on the LAN) | resolves to `192.168.15.2` — UniFi overrides the public answer |
 | `packages.mvx-lang.org` | does not exist yet |
+
+**The name resolves to two different addresses by design.** Cloudflare publishes
+the public address for the outside world; UniFi answers `192.168.15.2` for
+clients on the LAN, so internal traffic reaches Traefik directly instead of
+hairpinning out and back. Both halves are needed — a public record alone leaves
+LAN clients going the long way round, and a UniFi entry alone makes the name
+work only at home.
 
 ## 1. Cloudflare DNS
 
 In zone `mvx-lang.org`, add:
 
 ```
-Type: A    Name: packages    Content: 192.168.15.2    Proxy: DNS only (grey cloud)    TTL: Auto
+Type: A    Name: packages    Content: 157.211.20.183    Proxy: DNS only (grey cloud)    TTL: Auto
 ```
 
-**The grey cloud is not optional.** The origin is an RFC1918 address; an
-orange-clouded record tells Cloudflare to proxy to an address it cannot route,
-and the hostname returns 522. This mirrors what `mv-package.heydon.io` already
-does.
+That is the **public** address, matching `mv-package.heydon.io` exactly — not
+`192.168.15.2`, which is the LAN answer UniFi gives in step 3.
+
+Keep it grey-clouded, as the existing record is. Proxying would terminate TLS at
+Cloudflare, and the cert Traefik issues by DNS-01 would never be the one clients
+see.
 
 ## 2. Check the cert token covers the new zone — do this *before* step 4
 
@@ -46,12 +56,16 @@ the documented fallback — see the variant in step 4.
 
 ## 3. UniFi
 
-Add the local DNS entry so LAN clients resolve the new name, matching whatever
-`mv-package.heydon.io` has today:
+Add the local DNS override so LAN clients reach Traefik directly rather than
+hairpinning through the public address. This mirrors the entry
+`mv-package.heydon.io` already has:
 
 ```
 packages.mvx-lang.org  ->  192.168.15.2
 ```
+
+Without it the name still works from inside, but every internal request leaves
+the network and comes back.
 
 UniFi Network → Settings → Routing & Firewall (or Network → DNS, depending on
 the controller version) → local DNS records.
