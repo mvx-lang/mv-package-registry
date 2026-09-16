@@ -149,7 +149,8 @@ docker compose up -d --build           # container (persistent data volume + .en
 ```
 
 The live site runs the container on the hosting VM behind Traefik, which routes
-both `packages.mvx-lang.org` and `mv-package.heydon.io` to it.  `.env`:
+both `packages.mvx-lang.org` and `mv-package.heydon.io` to it
+(`docs/domain-move.md` is the runbook for that split).  `.env`:
 `WEB_ORIGIN` (where a browser belongs — the old host 301s page requests there,
 and leaving it unset disables the redirect entirely), `PUBLIC_ORIGIN` (so GitHub
 can redirect back from the App-manifest flow, and the origin baked into newly
