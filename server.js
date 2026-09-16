@@ -367,8 +367,19 @@ function waUserId(user) {
 }
 
 // ---- sessions (stateless signed cookie) ------------------------------
+// A session carries a stamp derived from the account's password hash, so
+// changing the password invalidates every session issued under the old one --
+// including ones on other devices.  Sessions are stateless signed values with
+// no server-side store, so without this there would be nothing to revoke and a
+// password change would not dislodge someone who already holds a session.
+function pwStamp(user) {
+  return crypto.createHmac('sha256', SECRET)
+    .update('pw:' + String((user && user.pw) || '')).digest('base64url').slice(0, 16);
+}
 function makeSession(username) {
-  const payload = Buffer.from(username).toString('base64url') + '.' + (Date.now() + 30 * 864e5);
+  const payload = Buffer.from(username).toString('base64url')
+    + '.' + (Date.now() + 30 * 864e5)
+    + '.' + pwStamp(loadUser(username));
   const sig = crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
@@ -376,11 +387,16 @@ function sessionUser(req) {
   const m = /(?:^|;\s*)mvpkg_session=([^;]+)/.exec(req.headers.cookie || '');
   if (!m) return null;
   const p = m[1].split('.');
-  if (p.length !== 3) return null;
-  const good = crypto.createHmac('sha256', SECRET).update(p[0] + '.' + p[1]).digest('base64url');
-  try { if (!crypto.timingSafeEqual(Buffer.from(p[2]), Buffer.from(good))) return null; } catch { return null; }
+  if (p.length !== 4) return null;
+  const signed = p[0] + '.' + p[1] + '.' + p[2];
+  const good = crypto.createHmac('sha256', SECRET).update(signed).digest('base64url');
+  try { if (!crypto.timingSafeEqual(Buffer.from(p[3]), Buffer.from(good))) return null; } catch { return null; }
   if (Date.now() > Number(p[1])) return null;
-  return loadUser(Buffer.from(p[0], 'base64url').toString());
+  const user = loadUser(Buffer.from(p[0], 'base64url').toString());
+  if (!user) return null;
+  // The password has changed since this session was issued.
+  try { if (!crypto.timingSafeEqual(Buffer.from(p[2]), Buffer.from(pwStamp(user)))) return null; } catch { return null; }
+  return user;
 }
 const sessionCookie = (req, username) => {
   const secure = !/^(localhost|127\.0\.0\.1)(:|$)/.test(req.headers.host || '');
@@ -711,6 +727,9 @@ function accountPage(user, opts) {
         <div><b>${esc(t.name || 'token')}</b><br><span class="meta">created ${new Date(t.created).toISOString().slice(0, 10)}${t.lastUsed ? ' &middot; last used ' + new Date(t.lastUsed).toISOString().slice(0, 10) : ' &middot; never used'}</span></div>
         <form method="post" action="/account/tokens/revoke" style="margin:0"><input type="hidden" name="id" value="${esc(t.id)}"><button style="padding:4px 12px">Revoke</button></form></div>`).join('')
     : '<p class="meta">No tokens yet.</p>';
+  const pwMsg = opts.pwChanged
+    ? '<div class="msg ok">Password changed. Any other session signed in with the old password has been ended.</div>' : '';
+  const pwErr = opts.pwError ? `<div class="msg err">${esc(opts.pwError)}</div>` : '';
   const freshTok = opts.freshToken
     ? `<div class="msg ok">New token — copy it now, it is shown only once:<br><code>${esc(opts.freshToken)}</code><br>
        <span class="meta">Send it as the <code>X-Auth-Token</code> header to publish without signing in, e.g.<br>
@@ -726,6 +745,17 @@ function accountPage(user, opts) {
     `<h3>Signed in as ${esc(user.username)}${adminBadge}</h3>
      <h3 style="margin-top:24px">Passkeys</h3>${pks}
      <p><button class="primary" type="button" onclick="addPasskey()">+ Add a passkey</button></p>
+     <h3 style="margin-top:24px">Password</h3>${pwMsg}${pwErr}
+     <form method="post" action="/account/password">
+       <label>Current password</label>
+       <input type="password" name="current" autocomplete="current-password" required>
+       <label>New password <span class="meta">(at least 8 characters)</span></label>
+       <input type="password" name="password" autocomplete="new-password" required>
+       <label>Confirm new password</label>
+       <input type="password" name="confirm" autocomplete="new-password" required>
+       <div style="margin-top:10px"><button class="primary" type="submit">Change password</button></div>
+     </form>
+     <p class="meta">Changing your password ends every other session. Publish tokens are unaffected &mdash; revoke those below.</p>
      <h3 style="margin-top:24px">Your packages</h3>${addMsg}${addErr}${refMsg}${pkgs}
      <form method="post" action="/packages" style="margin-top:14px">
        <label>Add a package — paste its <b>source URL</b> (a repository, or a link to its <code>mvpkg.json</code>)</label>
@@ -1399,6 +1429,27 @@ const server = http.createServer((req, res) => {
       if (u.pathname === '/register') return handleRegister(req, res, form);
       if (u.pathname === '/login') return handleLogin(req, res, form);
       if (u.pathname === '/logout') { clearSessionCookie(res); return redirect(res, '/'); }
+      if (u.pathname === '/account/password') {
+        if (!user) return redirect(res, '/login');
+        const cur = form.current || '', pw = form.password || '', again = form.confirm || '';
+        // The current password is required even for someone signed in with a
+        // passkey: a session is not proof of knowing it, and this is the one
+        // credential that survives a change of RP ID.
+        if (!user.pw || !verifyPw(cur, user.pw))
+          return sendHTML(res, 400, accountPage(user, { pwError: 'Current password is wrong.' }));
+        if (pw.length < 8)
+          return sendHTML(res, 400, accountPage(user, { pwError: 'New password must be at least 8 characters.' }));
+        if (pw !== again)
+          return sendHTML(res, 400, accountPage(user, { pwError: 'The two new passwords do not match.' }));
+        if (verifyPw(pw, user.pw))
+          return sendHTML(res, 400, accountPage(user, { pwError: 'That is already your password.' }));
+        user.pw = hashPw(pw);
+        saveUser(user);
+        // The change invalidated THIS session along with the rest, so issue a
+        // fresh one rather than signing the user out of the page they are on.
+        return sendHTML(res, 200, accountPage(user, { pwChanged: true }),
+          { 'Set-Cookie': sessionCookie(req, user.username) });
+      }
       if (u.pathname === '/account/tokens') {
         if (!user) return redirect(res, '/login');
         const tok = newToken();
