@@ -53,8 +53,16 @@ const WEB_HOST = WEB_ORIGIN ? (url.parse(WEB_ORIGIN).hostname || '') : '';
 // The API surface, which NEVER redirects, whichever host it is asked on.
 // /packages is here because GET is the index and POST is the token
 // authenticated publish the account page documents as a curl one-liner.
+// /gh/app/hook is the App's own delivery endpoint and belongs here for the same
+// reason.  It is safe today only because GitHub uses POST -- an incidental
+// guarantee, and one whose failure is silent: a redirected delivery arrives as
+// a bodyless GET, fails the signature check, and releases stop with nothing
+// logged.  /gh/app/created is deliberately NOT here: it is a browser GET
+// returning from GitHub, and moving it to the canonical host is how it reaches
+// the origin the session cookie belongs to.
 function isApiPath(p) {
   return p === '/packages' || p === '/search'
+      || p === '/gh/app/hook'
       || p.startsWith('/package/')
       || p.startsWith('/webhook/')
       || p.startsWith('/installs/');
