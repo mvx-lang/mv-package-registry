@@ -50,9 +50,18 @@ zones it cannot edit (the snowgum ones). If it has no `Zone:DNS:Edit` on
 `mvx-lang.org`, issuance for the new hostname fails and the router serves a
 self-signed cert.
 
-Either widen the token in the Cloudflare dashboard (**My Profile → API Tokens →**
-edit the token used for DNS-01, add `mvx-lang.org` to Zone Resources), or use
-the documented fallback — see the variant in step 4.
+**Measured, not assumed:** the token verifies active and *can see*
+`mvx-lang.org` — but visibility is not edit. It also sees `snowgumretreat.com`,
+`delatitesnowgum.com.au` and `deploy-it.net`, and every one of those is in
+`acme-http.json`, not `acme.json`. So its shape is `Zone:Read` across all zones
+plus `Zone:DNS:Edit` on a named subset, and `mvx-lang.org` was bought after the
+token was made, so it cannot be in that subset.
+
+Treat DNS-01 for the new hostname as **expected to fail** until the token is
+widened: Cloudflare → My Profile → API Tokens → edit the DNS-01 token, add
+`mvx-lang.org` under Zone Resources. Worth doing — DNS-01 needs no inbound port
+80 and handles wildcards later. Until then, use the HTTP-01 variant in step 4,
+which is the proven path for the four domains already on it.
 
 ## 3. UniFi
 
