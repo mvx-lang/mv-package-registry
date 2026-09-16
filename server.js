@@ -39,6 +39,27 @@ const ghapp = require('./lib/ghapp');
 // origin in production, derive nothing useful in dev.
 const BASE_URL = process.env.PUBLIC_ORIGIN || process.env.WEBAUTHN_ORIGIN || '';
 
+// The website has a domain of its own.  The JSON API answers on the old host
+// as well, and must keep doing so: MVPKG.REG's DEFURL is compiled into every
+// client already installed, and GitHub holds release webhooks whose URL was
+// built when the package was tracked -- a webhook delivery does not follow
+// redirects, so a 301 on /webhook/<id> would silently stop releases.
+//
+// WEB_ORIGIN, when set, is where a BROWSER belongs; a page request arriving on
+// any other host is sent there.
+const WEB_ORIGIN = (process.env.WEB_ORIGIN || '').replace(/\/+$/, '');
+const WEB_HOST = WEB_ORIGIN ? (url.parse(WEB_ORIGIN).hostname || '') : '';
+
+// The API surface, which NEVER redirects, whichever host it is asked on.
+// /packages is here because GET is the index and POST is the token
+// authenticated publish the account page documents as a curl one-liner.
+function isApiPath(p) {
+  return p === '/packages' || p === '/search'
+      || p.startsWith('/package/')
+      || p.startsWith('/webhook/')
+      || p.startsWith('/installs/');
+}
+
 // Cloudflare Turnstile (CAPTCHA) on registration.  Off unless both keys are
 // set; the sitekey is public (rendered in the form), the secret verifies the
 // token server-side.
@@ -1174,6 +1195,17 @@ function handleLogin(req, res, form) {
 const server = http.createServer((req, res) => {
   const u = url.parse(req.url, true);
   const parts = u.pathname.split('/').filter(Boolean);
+
+  // A browser asking the old host for a page is sent to the website's own
+  // domain.  GET and HEAD only: redirecting a POST would turn a publish, a
+  // webhook delivery or an install report into a GET and lose its body.
+  if (WEB_HOST && (req.method === 'GET' || req.method === 'HEAD')
+      && !isApiPath(u.pathname)
+      && String(req.headers.host || '').split(':')[0] !== WEB_HOST) {
+    res.writeHead(301, { Location: WEB_ORIGIN + req.url });
+    return res.end();
+  }
+
   const user = sessionUser(req);
 
   if (req.method === 'POST') {

@@ -6,7 +6,12 @@ MultiValue), the tools that build and publish releases, and the UniData
 builder image. Split out of the client repo so people installing the
 `MVPKG` client don't download the server and build infrastructure.
 
-Live at **https://mv-package.heydon.io**.
+Live at **https://packages.mvx-lang.org**.
+
+The old host, `mv-package.heydon.io`, still answers the JSON API — clients
+installed before the move have it compiled in, and GitHub holds release
+webhooks that point at it — but a page request there is redirected to the new
+domain.  See issue #55.
 
 ## The package manifest (`mvpkg.json`)
 
@@ -143,9 +148,12 @@ node server.js 8080                    # local dev
 docker compose up -d --build           # container (persistent data volume + .env)
 ```
 
-The live site runs the container on the hosting VM behind Traefik
-(`mv-package.heydon.io`).  `.env`: `PUBLIC_ORIGIN` (so GitHub can redirect back
-from the App-manifest flow — defaults to `WEBAUTHN_ORIGIN`), `MVPKG_ADMIN_USERS`,
+The live site runs the container on the hosting VM behind Traefik, which routes
+both `packages.mvx-lang.org` and `mv-package.heydon.io` to it.  `.env`:
+`WEB_ORIGIN` (where a browser belongs — the old host 301s page requests there,
+and leaving it unset disables the redirect entirely), `PUBLIC_ORIGIN` (so GitHub
+can redirect back from the App-manifest flow, and the origin baked into newly
+created webhook URLs — defaults to `WEBAUTHN_ORIGIN`), `MVPKG_ADMIN_USERS`,
 `WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN`, the Turnstile keys, and — only if you are
 *not* using the GitHub App — an optional `GITHUB_TOKEN` for the legacy per-repo
 webhook fallback / higher API limits.

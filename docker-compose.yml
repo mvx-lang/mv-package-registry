@@ -1,6 +1,9 @@
 # mv_package registry — deploy on the hosting VM; fronted by the external
-# Traefik (192.168.15.2) which routes mv-package.heydon.io to the published
-# port.  GPL-2.0-only.
+# Traefik (192.168.15.2), which routes BOTH packages.mvx-lang.org (the website,
+# and the API for anything installed from now on) and mv-package.heydon.io (the
+# API only, for clients and webhooks that predate the move) to the published
+# port.  The old host answers a page request with a 301; see issue #55.
+# GPL-2.0-only.
 services:
   mvpkg-registry:
     build: .
@@ -15,8 +18,10 @@ services:
       - MVPKG_PUBLISH_TOKEN=${MVPKG_PUBLISH_TOKEN:?set MVPKG_PUBLISH_TOKEN in .env}
       - MVPKG_ADMIN_USERS=${MVPKG_ADMIN_USERS:-}   # comma-separated admin usernames
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}             # admin:repo_hook — auto-installs release webhooks + reads mvpkg.json
-      - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-}         # e.g. mv-package.heydon.io
-      - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-}       # e.g. https://mv-package.heydon.io
+      - WEB_ORIGIN=${WEB_ORIGIN:-}                 # website home, e.g. https://packages.mvx-lang.org
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}           # origin baked into NEW webhook URLs + the GitHub App callback
+      - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-}         # e.g. packages.mvx-lang.org
+      - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-}       # e.g. https://packages.mvx-lang.org
       - TURNSTILE_SITEKEY=${TURNSTILE_SITEKEY:-}   # Cloudflare Turnstile (CAPTCHA), public
       - TURNSTILE_SECRET=${TURNSTILE_SECRET:-}     # Turnstile secret (server-side verify)
     networks:

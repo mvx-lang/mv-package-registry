@@ -95,6 +95,6 @@ path above just uses the caller's `GITHUB_TOKEN`.
 ## Registry config for publishers
 
 - **`MVPKG_REGISTRY`** — the registry base URL a client/CI points at (default
-  `https://mv-package.heydon.io`); must be `https`.
+  `https://packages.mvx-lang.org`); must be `https`.
 - **`MVPKG_PUBLISH_TOKEN`** / a per-user **`X-Auth-Token`** — publish a package to
   the registry index headlessly (`POST /packages`); see the registry README.
