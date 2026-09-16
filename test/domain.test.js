@@ -66,6 +66,23 @@ test('the old host sends a browser to the website and keeps serving the API', as
     assert.strictEqual(r.loc, WEB + p, `page ${p} should keep its path and query`);
   }
 
+  // --- the GitHub App's delivery endpoint does not move, on GET either: a
+  //     redirected delivery arrives bodyless, fails its signature check, and
+  //     releases stop with nothing logged ---
+  {
+    const r = await req(port, OLD, '/gh/app/hook');
+    assert.notStrictEqual(r.status, 301, 'GET /gh/app/hook must not redirect');
+  }
+
+  // --- but the browser callback DOES move: it has to reach the origin the
+  //     session cookie belongs to, carrying its code and state ---
+  {
+    const r = await req(port, OLD, '/gh/app/created?code=x&state=y');
+    assert.strictEqual(r.status, 301, '/gh/app/created should redirect');
+    assert.strictEqual(r.loc, WEB + '/gh/app/created?code=x&state=y',
+      'the callback must keep code and state');
+  }
+
   // --- the API does NOT move, on the very same host ---
   for (const p of ['/packages', '/search?q=getopt', '/package/mvx-lang/getopt']) {
     const r = await req(port, OLD, p);
