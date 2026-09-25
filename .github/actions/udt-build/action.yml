@@ -53,11 +53,25 @@ runs:
       with:
         image: ${{ inputs.image }}
 
+    # THE MANIFEST STAMPER, so the artifact names the release it is rather than
+    # whatever the package last committed (#62).  Standalone Python -- this
+    # step compiles nothing -- taken from `main`, which is mvx's RELEASED line:
+    # it moves when a release merges and not before.
+    - name: Check out the manifest stamper
+      uses: actions/checkout@v5
+      with:
+        repository: mvx-lang/mvx
+        ref: main
+        path: .mvx-stamper
+        sparse-checkout: .github/actions/publish-source
+        sparse-checkout-cone-mode: false
+
     - id: build
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
         ARTIFACT: ${{ inputs.artifact }}
+        STAMPER: ${{ github.workspace }}/.mvx-stamper/.github/actions/publish-source/stamp-manifests.py
       run: sh "$GITHUB_ACTION_PATH/build-release.sh" "$PACKAGE"
 
     - name: Publish the UniData binary asset

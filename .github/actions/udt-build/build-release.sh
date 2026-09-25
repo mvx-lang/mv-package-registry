@@ -75,6 +75,37 @@ rm -rf dist && mkdir -p dist && sh build-udt.sh /pkg/dist'
 [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ] || {
   echo "::error::build-udt.sh produced no dist/ tree" >&2; exit 1; }
 
+# THE STAGED TREE HAS TO SAY WHAT THIS RELEASE IS (#62).  build-udt.sh copies
+# PKG and mvpkg.json out of the checkout, where the version is whatever was last
+# committed -- only the artifact FILENAME ever took it from the tag.  So cmd
+# 1.4.1's udt asset declared 1.3.0, and getopt 1.1.1's declared 1.0.
+#
+# REFUSED RATHER THAN SHIPPED WRONG.  The stamper is Python and this is a
+# self-hosted runner; if it cannot run, the release stops here.  An artifact
+# that lies about its own version is worse than one that was not built -- it
+# installs, and then every version comparison about it is wrong.
+if [ -n "${STAMPER:-}" ] && [ -f "$STAMPER" ]; then
+  command -v python3 >/dev/null 2>&1 || {
+    echo "::error::python3 is needed to stamp the manifest, and is not on this runner" >&2
+    exit 1; }
+  n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
+  if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
+    STAMPDIR="dist/$one_top"
+  else
+    STAMPDIR="dist"
+  fi
+  python3 "$STAMPER" "$STAMPDIR" "$VER"
+  if [ -f "$STAMPDIR/PKG" ]; then
+    got="$(sed -n 2p "$STAMPDIR/PKG")"
+    [ "$got" = "$VER" ] || {
+      echo "::error::PKG line 2 is '$got' after stamping, expected '$VER'" >&2
+      exit 1; }
+  fi
+else
+  echo "::error::no manifest stamper supplied (set STAMPER); refusing to publish an artifact that would name the wrong version" >&2
+  exit 1
+fi
+
 TARBALL="${BASE}.tar.gz"
 # If build-udt.sh staged a SINGLE top-level directory (an account-shaped package,
 # e.g. git/), tar it BY NAME so entries are "<dir>/..." with no "./" prefix — the
