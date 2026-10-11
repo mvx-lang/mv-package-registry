@@ -150,3 +150,53 @@ jobs:
           print(f'\n{len(wf)} workflows, {len(ac)} actions, {bad} bad')
           sys.exit(1 if bad else 0)
           PY
+
+  # ---- the workflows and actions, statically ---------------------------------
+  # Ported whole from mvx's `lint-workflows` (mvx/.github/workflows/ci.yml), not
+  # designed here: that job already carries the two things about actionlint that
+  # are easy to get wrong, and both were reproduced in THIS repo before this was
+  # written (#70).
+  #
+  # WHY IT MATTERS MORE HERE THAN ANYWHERE.  This repo's product is seven
+  # composite actions that json and mapfield resolve at @main, so a bad
+  # expression fails SOMEONE ELSE'S CI on a change they did not make.  The
+  # `actions` job above catches a definition that will not parse or has lost its
+  # `runs` block; it catches nothing semantic.
+  lint-workflows:
+    name: lint-workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # SHELLCHECK MUST BE HERE, AND actionlint WILL NOT SAY SO.  It runs the
+      # shell checks only when shellcheck is on PATH and is silent when it is
+      # absent -- it simply checks less.  Measured here, with a deliberate
+      # unquoted variable planted in this very file:
+      #
+      #     shellcheck on PATH     -> SC2086 reported, exit 1
+      #     shellcheck off PATH    -> 0 findings,      exit 0
+      #
+      # So without this step the job passes while checking nothing, which is the
+      # failure mode the count guards above exist for, by another route.
+      # GitHub's images ship shellcheck, so this is about noticing the day one
+      # stops rather than installing it.
+      - name: "shellcheck is present, so the shell in run: blocks is checked too"
+        run: |
+          set -eu
+          command -v shellcheck >/dev/null || {
+            echo "::error::no shellcheck on PATH -- actionlint would skip every"
+            echo "::error::run: block silently.  Install it in this job."
+            exit 1
+          }
+          shellcheck --version | sed -n '2p'
+
+      # PINNED, not @latest: a linter that changes under us turns an unrelated
+      # push red.  `go install` at a tag also gets module checksum verification
+      # from the Go checksum database, which a curl|sh installer does not.
+      - name: Lint every workflow
+        env:
+          ACTIONLINT_VERSION: v1.7.12
+        run: |
+          set -eu
+          go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+          "$(go env GOPATH)/bin/actionlint" -color
