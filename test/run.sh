@@ -65,12 +65,20 @@ cleanup() {
 trap cleanup EXIT
 
 # --- a static file server for the fixture tarballs (registry hosts nothing) ---
+# ITS OUTPUT IS REDIRECTED, like the registry server's below, and that is not
+# tidiness.  Backgrounded without redirection it inherits this script's stdout
+# and holds it open after the script finishes -- so any consumer reading to EOF
+# waits for ever.  That is what hung the first CI run: the loop ran to the end
+# and the step then sat until the 20-minute timeout, because `| tee` never saw
+# EOF.  The job's cleanup said so in passing -- "Terminate orphan process:
+# (tee)" and "(node)" -- and it never happened by hand, because a terminal is
+# not a pipe that ends.
 FSPORT="$(node -e 'const s=require("net").createServer();s.listen(0,()=>{console.log(s.address().port);s.close()})')"
 node -e '
   const http=require("http"),fs=require("fs"),path=require("path"),dir=process.argv[1],port=+process.argv[2];
   http.createServer((q,r)=>{const f=path.join(dir,path.basename(q.url));
     fs.readFile(f,(e,d)=>e?(r.writeHead(404),r.end()):(r.writeHead(200),r.end(d)));}).listen(port);
-' "$FILES" "$FSPORT" &
+' "$FILES" "$FSPORT" >"$WORK/files.log" 2>&1 &
 FSPID=$!
 BASE="http://127.0.0.1:$FSPORT"
 
@@ -116,39 +124,66 @@ MVX="$MVX" MVX_DRIVERS="$MVX_DRIVERS" MVXSYSTEM="$MVXSYSTEM" \
 
 # each install starts fresh (empty store + account manifest) so every package is
 # genuinely downloaded/built/linked and prints "installed <name> <ver>".
-inst() { rm -rf "$MVPKG_STORE"; rm -f "$CLIENT/mvpkg.installed"; MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install $1" 2>&1; }
+# A HUNG SESSION MUST NOT COST THE WHOLE JOB, AND MUST SAY WHICH ONE HUNG.
+# The first CI run of this script reached test 6 and then sat until the job
+# timed out 20 minutes later, and the log could not say which of that test's
+# two invocations was stuck -- so the failure was unactionable.  Every session
+# now runs under a timeout where one is available, and reads stdin from
+# /dev/null so a session that waits for input ends instead of blocking.
+# `timeout` on Linux, `gtimeout` on a mac with coreutils, neither on a stock
+# mac -- where the guard simply does not apply and a hang is the developer's to
+# notice.  CI is Linux, which is where it matters.
+TMO=""
+for _c in timeout gtimeout; do
+   if command -v "$_c" >/dev/null 2>&1; then
+      TMO="$_c ${MVPKG_TEST_TIMEOUT:-120}"; break
+   fi
+done
+RUNMVX() { MVXPRIV=unrestricted $TMO "$MVX" "$@" </dev/null 2>&1; }
+
+inst() { rm -rf "$MVPKG_STORE"; rm -f "$CLIENT/mvpkg.installed"; RUNMVX -a "$CLIENT" -c "MVPKG install $1"; }
 fail=0
 say() { echo "FAIL: $1"; fail=1; }
 
 # 1. install a leaf: downloaded, built, linked; recorded in the store + account
+echo "== test 1 leaf"
 OUT="$(inst demo)"; echo "$OUT" | sed 's/^/  demo> /'
 echo "$OUT" | grep -q "installed demo 1.0"      || say "leaf not installed"
 [ -f "$MVPKG_STORE/demo/MARKER" ]                || say "leaf not unpacked to the store"
 grep -qx demo "$CLIENT/mvpkg.installed" 2>/dev/null || say "leaf not recorded in the account"
 
 # 2. a missing package reports cleanly and records nothing
+echo "== test 2 missing"
 OUT="$(inst nosuch)"
 echo "$OUT" | grep -q "not found in registry"   || say "missing package not reported"
 
 # 3. dependencies: depdemo pulls demo first, then itself
+echo "== test 3 deps"
 OUT="$(inst depdemo)"; echo "$OUT" | sed 's/^/  dep> /'
 DL=$(echo "$OUT" | grep -n "installed demo 1.0"    | head -1 | cut -d: -f1)
 PL=$(echo "$OUT" | grep -n "installed depdemo 1.0" | head -1 | cut -d: -f1)
 { [ -n "$DL" ] && [ -n "$PL" ] && [ "$DL" -lt "$PL" ]; } || say "dependency not installed before dependent"
 
 # 4. an optional dependency that is not published is skipped, not fatal
+echo "== test 4 optional"
 OUT="$(inst optdemo)"; echo "$OUT" | sed 's/^/  opt> /'
 echo "$OUT" | grep -qi "optional dependency .*ghost.* skipping" || say "optional dep not skipped"
 echo "$OUT" | grep -q "installed optdemo 1.0"    || say "consumer of an optional dep not installed"
 
 # 5. provides: depending on the old virtual name installs the provider (cursors)
+echo "== test 5 provides"
 OUT="$(inst usescur)"; echo "$OUT" | sed 's/^/  prov> /'
 echo "$OUT" | grep -q "installed cursors 2.0"    || say "virtual name did not resolve to its provider"
 echo "$OUT" | grep -q "installed usescur 1.0"    || say "consumer of a virtual dep not installed"
 
 # 6. idempotent: re-installing with the manifest present fetches nothing
-inst demo >/dev/null
-OUT="$(MVXPRIV=unrestricted "$MVX" -a "$CLIENT" -c "MVPKG install demo" 2>&1)"
+echo "== test 6 idempotent"
+say6() { echo "  idem> $1"; }
+say6 "priming the account"
+inst demo >/dev/null || say6 "the priming install did not exit 0"
+say6 "re-installing with the manifest present"
+OUT="$(RUNMVX -a "$CLIENT" -c "MVPKG install demo")" || say6 "the re-install did not exit 0"
+say6 "done"
 echo "$OUT" | grep -qi "fetching"                && say "re-fetched an already-installed package"
 
 if [ "$fail" = 0 ]; then echo "PASS: end-to-end install loop"; else exit 1; fi
