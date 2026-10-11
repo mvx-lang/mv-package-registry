@@ -58,9 +58,20 @@ REGDIR="$WORK/index"; mkdir -p "$REGDIR"             # the registry's package in
 FILES="$WORK/files"; mkdir -p "$FILES"               # tarballs the file server hosts
 export MVPKG_STORE="$WORK/store"                     # isolate the global store
 cleanup() {
-  { kill "$REGPID"; wait "$REGPID"; } 2>/dev/null
-  { kill "$FSPID"; wait "$FSPID"; } 2>/dev/null
-  rm -rf "$WORK" "$CLIENT/mvpkg.installed"
+  # THE SCRIPT'S EXIT STATUS IS THE ASSERTIONS' VERDICT, not this trap's last
+  # command.  `wait` on a child we have just TERMed returns 143, and that was
+  # leaking out as the script's status -- so a run whose assertions failed
+  # reported 143 ("killed") instead of 1, which reads as infrastructure rather
+  # than as a test result.  The first CI failure here was misread that way.
+  rc=$?
+  { kill "$REGPID"; wait "$REGPID"; } 2>/dev/null || :
+  { kill "$FSPID"; wait "$FSPID"; } 2>/dev/null || :
+  # Put the checkout back as it was found, including PACKAGES -- which this
+  # script rewrites and which mv_package tracks in git (mv_package#168).
+  [ -f "$PKGSNAP" ] && cp "$PKGSNAP" "$CLIENT/PACKAGES" 2>/dev/null
+  [ -f "$INSTSNAP" ] && cp "$INSTSNAP" "$CLIENT/mvpkg.installed" 2>/dev/null
+  rm -rf "$WORK"
+  exit "$rc"
 }
 trap cleanup EXIT
 
@@ -141,7 +152,32 @@ for _c in timeout gtimeout; do
 done
 RUNMVX() { MVXPRIV=unrestricted $TMO "$MVX" "$@" </dev/null 2>&1; }
 
-inst() { rm -rf "$MVPKG_STORE"; rm -f "$CLIENT/mvpkg.installed"; RUNMVX -a "$CLIENT" -c "MVPKG install $1"; }
+# EACH SCENARIO STARTS FROM THE CHECKOUT'S STATE, NOT THE LAST SCENARIO'S.
+#
+# Linking records the package in the account's PACKAGES file, which mvx reads to
+# find extensions.  $WORK is ONE mktemp for the whole script, so every scenario
+# shares a store path -- and wiping the store without resetting PACKAGES leaves
+# mvx reporting "already linked" for a package whose store no longer exists, so
+# the install is skipped.
+#
+# That is what failed tests 1 and 3 on the first run that got this far: the
+# dep> scenario never reinstalled demo, so the ordering assertion had nothing to
+# order, and the leaf was never recorded in a manifest it was not reinstalled
+# into.  It cannot happen on a machine where these tests have never run.
+#
+# SNAPSHOTTED, NOT EMPTIED, because the checkout may legitimately carry entries
+# this test has no business discarding -- and restored on the way out, so a hand
+# run does not leave the checkout dirtier than it found it.
+PKGSNAP="$WORK/PACKAGES.orig"
+INSTSNAP="$WORK/installed.orig"
+if [ -f "$CLIENT/PACKAGES" ]; then cp "$CLIENT/PACKAGES" "$PKGSNAP"; else : > "$PKGSNAP"; fi
+if [ -f "$CLIENT/mvpkg.installed" ]; then cp "$CLIENT/mvpkg.installed" "$INSTSNAP"; else : > "$INSTSNAP"; fi
+reset_account() {
+   cp "$PKGSNAP" "$CLIENT/PACKAGES"
+   cp "$INSTSNAP" "$CLIENT/mvpkg.installed"
+}
+
+inst() { rm -rf "$MVPKG_STORE"; reset_account; RUNMVX -a "$CLIENT" -c "MVPKG install $1"; }
 fail=0
 say() { echo "FAIL: $1"; fail=1; }
 
