@@ -5,3 +5,6 @@ registry/*
 node_modules/
 # deploy secrets
 .env
+
+# Checkouts CI makes for the end-to-end install loop (#69).
+.deps/
