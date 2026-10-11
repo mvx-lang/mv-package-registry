@@ -1,0 +1,112 @@
+# mv-package-registry — run an MV package's own BASIC test in a real account on
+# udt, uv or jbase.  Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only.
+#
+# The counterpart to setup-udt / setup-uv / setup-jbase: those put the licensed
+# toolchain's `*-run` wrapper on PATH, and this reaches through it to make an
+# account, compile and catalog a package's BASIC items, run its test PROGRAM and
+# assert the result.
+#
+#   runs-on: [self-hosted, linux, uv]
+#   steps:
+#     - uses: actions/checkout@v5
+#     - uses: mvx-lang/mv-package-registry/.github/actions/setup-uv@main
+#     - uses: mvx-lang/mv-package-registry/.github/actions/mv-package-test@main
+#       with:
+#         platform: uv
+#         sources: .deps/mapfield/BP/MAPFIELD BP/JSONENCODE BP/JSONDECODE
+#         test:    tests/JSON.ESCAPES
+#         cases:   5
+#
+# WHY IT LIVES HERE AND NOT IN EACH PACKAGE.  Almost all of run-test.sh is
+# per-platform knowledge that cost real CI runs to get right -- CREATE-ACCOUNT
+# and not mkdir on jBASE; only udt being born with a BP; UniVerse's CREATE.FILE
+# asking seven questions with the description answered EMPTY so VOC attribute 1
+# stays a clean "F"; one session per run because UniVerse's licence seats do not
+# come back fast enough for a sequence of short ones.  A second copy means a
+# weak assertion has two homes (mvx-lang/mv-package-registry#65).
+#
+# DEPENDENCY POLICY STAYS WITH THE CONSUMER.  `sources` is a list of paths, so a
+# package that needs another package's items checks them out however it likes --
+# json resolves mapfield's latest stable release in its own composite action --
+# and nothing about one package's dependencies is encoded here.
+name: Run an MV package test
+description: Make an account on udt, uv or jbase, compile and catalog a package's BASIC items, run its test and assert the result.
+
+inputs:
+  platform:
+    description: Which MV system — udt, uv or jbase.  Its setup-* action must have run first.
+    required: true
+  sources:
+    description: >-
+      Space-separated paths, relative to the checkout, of the BASIC items to
+      compile and CATALOG — the package's own and any dependency's.  Each
+      becomes a BP item under its basename, so no two may share one.
+    required: true
+  test:
+    description: Path to the test PROGRAM, relative to the checkout.
+    required: true
+  cases:
+    description: >-
+      How many `ok=1` lines the test must print.  Exact, not a minimum: a test
+      that quietly loses a case still prints FAILURES=0 and no ok=0.
+    required: true
+  account:
+    description: Where to build the account inside the container.
+    required: false
+    default: /tmp/mvpkgtest
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        MVPKGTEST_PLATFORM: ${{ inputs.platform }}
+        MVPKGTEST_SOURCES: ${{ inputs.sources }}
+        MVPKGTEST_TEST: ${{ inputs.test }}
+        MVPKGTEST_CASES: ${{ inputs.cases }}
+        MVPKGTEST_ACCOUNT: ${{ inputs.account }}
+      run: |
+        set -euo pipefail
+
+        case "$MVPKGTEST_PLATFORM" in
+          udt|uv|jbase) ;;
+          *) echo "::error::platform must be udt, uv or jbase (got '$MVPKGTEST_PLATFORM')"; exit 1 ;;
+        esac
+
+        # AN EXACT COUNT, so a typo cannot become "0 expected" and pass a run
+        # that printed nothing.
+        case "$MVPKGTEST_CASES" in
+          ''|*[!0-9]*) echo "::error::cases must be a positive integer (got '$MVPKGTEST_CASES')"; exit 1 ;;
+          0) echo "::error::cases must be greater than 0 -- a test that asserts nothing is not a test"; exit 1 ;;
+        esac
+
+        # THE PATHS GO THROUGH AN `eval` INSIDE THE CONTAINER.  The *-run
+        # wrappers take a command STRING and eval it, so a path carrying a
+        # quote, a semicolon or a backtick would run as shell there.  These are
+        # file paths in a repository, so the safe set is generous enough to be
+        # no constraint in practice -- and refusing early beats debugging it
+        # through two layers of quoting.
+        for p in $MVPKGTEST_SOURCES "$MVPKGTEST_TEST"; do
+          case "$p" in
+            *[!A-Za-z0-9._/-]*)
+              echo "::error::path '$p' has a character that is unsafe through the container's eval"
+              exit 1 ;;
+          esac
+        done
+
+        runner="${MVPKGTEST_PLATFORM}-run"
+        command -v "$runner" >/dev/null 2>&1 || {
+          echo "::error::$runner is not on PATH -- run the setup-$MVPKGTEST_PLATFORM action first"
+          exit 1
+        }
+
+        # THE SCRIPT HAS TO BE IN THE WORKSPACE.  The *-run wrappers mount only
+        # $PWD at /pkg, so $GITHUB_ACTION_PATH -- a path on the runner host --
+        # is invisible inside the container.  Copying it in is what makes it
+        # reachable, and it is also what lets the same invocation be repeated by
+        # hand from a checkout.
+        mkdir -p .mv-package-test
+        install -m 0755 "$GITHUB_ACTION_PATH/run-test.sh" .mv-package-test/run-test.sh
+
+        echo "mv-package-test: $MVPKGTEST_PLATFORM, $MVPKGTEST_TEST, $MVPKGTEST_CASES cases"
+        "$runner" "MVPKGTEST_ACCT='$MVPKGTEST_ACCOUNT' sh /pkg/.mv-package-test/run-test.sh $MVPKGTEST_PLATFORM '$MVPKGTEST_SOURCES' '$MVPKGTEST_TEST' $MVPKGTEST_CASES"

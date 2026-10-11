@@ -1,0 +1,152 @@
+# mv-package-registry — what can be checked on a plain runner, every push and PR.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only (see LICENSE).
+#
+# WHY THIS EXISTS, AND WHY IT IS THE WORST GAP TO HAVE HAD.  There was no ci.yml
+# at all: udt-release.yml and udt-smoke.yml were the only workflows, so a pull
+# request here was checked by nothing.  And this is the repo that hosts the
+# composite actions json and mapfield's ENTIRE CI runs through -- setup-udt,
+# setup-uv, setup-jbase and mv-package-test (#65).  A broken action.yml or
+# *-run wrapper here turns two other repos red, and nothing here said so (#67).
+#
+# THE TESTS WERE ALREADY WRITTEN.  test/ holds 14 node:test files, 95 tests,
+# under a second, and NO dependencies -- package.json has no `dependencies`
+# field and every require is a Node builtin or local lib/.  They were free to
+# run on a hosted runner the whole time and nothing ran them.
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- the 95 tests ---------------------------------------------------------
+  # TWO NODE VERSIONS, for two different questions.  20 is what the Dockerfile
+  # ships (`FROM node:20-alpine`), so it is production parity and the one a
+  # failure must be taken seriously on.  24 is ahead of it, so a node:test or
+  # builtin change that would break the next image bump surfaces here first
+  # rather than in a deploy.
+  tests:
+    name: tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # which versions fail is the information
+      matrix:
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # NO INSTALL STEP, and that is not an oversight: there are no
+      # dependencies to install.  `npm ci` would fail for want of a lockfile.
+      #
+      # The glob is explicit rather than `--test test/`, because directory
+      # discovery has changed across Node versions and test/ also holds a shell
+      # script.  Naming the files means both versions run the same 14.
+      - name: Run the test suite
+        run: node --test test/*.test.js
+
+  # ---- the shell scripts ----------------------------------------------------
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends shellcheck
+
+      # FOUND, NOT LISTED, so a script added later cannot quietly go unchecked.
+      #
+      # AND BOTH PATTERNS.  Three of these have no .sh extension -- udt-run,
+      # uv-run and jbase-run -- and those three are what every MV job in json
+      # and mapfield goes through.  A plain "*.sh" glob misses exactly the ones
+      # that matter most.
+      #
+      # THE COUNT IS ASSERTED, because a glob that matches nothing makes
+      # shellcheck exit 0 and this job green.  That is not hypothetical: while
+      # writing #67 a `grep -v "^./.git"` silently excluded every .github
+      # script -- `.github` starts with `.git` -- and the run looked clean.  The
+      # floor is the 13 that exist now; it is a floor, not a count, so adding a
+      # script does not mean editing this number.
+      - name: Every shell script lints
+        run: |
+          set -eu
+          # POSIX, no mapfile and no arrays: this is then runnable by hand with
+          # any /bin/sh, which is how it was checked before it was committed.
+          list=$(mktemp)
+          find . \( -name '*.sh' -o -name '*-run' \) \
+               -not -path './.git/*' \
+               -not -path './node_modules/*' | sort > "$list"
+          n=$(wc -l < "$list" | tr -d ' ')
+          if [ "$n" -lt 13 ]; then
+            echo "::error::found only $n shell scripts, expected at least 13 -- the discovery is broken, not the repo"
+            sed 's/^/  /' "$list"
+            exit 1
+          fi
+          echo "shellchecking $n scripts"
+          fail=0
+          while IFS= read -r f; do
+            if shellcheck -S warning "$f"; then
+              echo "  ok   $f"
+            else
+              echo "  FAIL $f"
+              fail=1
+            fi
+          done < "$list"
+          [ "$fail" -eq 0 ]
+
+  # ---- the actions this repo exists to publish ------------------------------
+  # A MALFORMED action.yml BREAKS CONSUMERS, NOT THIS REPO, which is the whole
+  # reason to check it here: json and mapfield resolve these at @main, so the
+  # first symptom of a bad one is someone else's CI failing on a change they did
+  # not make.  Parsing every definition is cheap and catches gross breakage.
+  #
+  # Each composite action is also checked for the `runs.using` it claims, so a
+  # file that parses but is not an action -- an action.yml that lost its `runs`
+  # block to a bad edit -- does not read as fine.
+  actions:
+    name: actions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Every workflow and action definition parses
+        run: |
+          set -euo pipefail
+          pip3 install --quiet pyyaml
+          python3 - <<'PY'
+          import yaml, pathlib, sys
+          wf = sorted(pathlib.Path('.').glob('.github/workflows/*.yml'))
+          ac = sorted(pathlib.Path('.').glob('.github/actions/*/action.yml'))
+          bad = 0
+          for f in wf:
+              try:
+                  d = yaml.safe_load(f.read_text())
+                  assert isinstance(d, dict) and 'jobs' in d, 'no jobs block'
+                  print(f'  ok   {f}  ({len(d["jobs"])} jobs)')
+              except Exception as e:
+                  print(f'  BAD  {f}: {e}'); bad += 1
+          for f in ac:
+              try:
+                  d = yaml.safe_load(f.read_text())
+                  using = d['runs']['using']
+                  assert d.get('name'), 'no name'
+                  print(f'  ok   {f}  ({using})')
+              except Exception as e:
+                  print(f'  BAD  {f}: {e}'); bad += 1
+          # A GLOB THAT MATCHED NOTHING MUST NOT PASS, for the same reason the
+          # shellcheck job asserts its count.
+          if not wf or not ac:
+              print(f'::error::found {len(wf)} workflows and {len(ac)} actions -- the discovery is broken')
+              sys.exit(1)
+          print(f'\n{len(wf)} workflows, {len(ac)} actions, {bad} bad')
+          sys.exit(1 if bad else 0)
+          PY
