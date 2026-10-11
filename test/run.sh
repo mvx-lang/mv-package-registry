@@ -185,9 +185,20 @@ PKGSNAP="$WORK/PACKAGES.orig"
 INSTSNAP="$WORK/installed.orig"
 if [ -f "$CLIENT/PACKAGES" ]; then cp "$CLIENT/PACKAGES" "$PKGSNAP"; else : > "$PKGSNAP"; fi
 if [ -f "$CLIENT/mvpkg.installed" ]; then cp "$CLIENT/mvpkg.installed" "$INSTSNAP"; fi
+# THE INSTALLED SET IS MVPKG.LOCK, NOT mvpkg.installed.  mv_package says so
+# outright: "A native master-dictionary (VOC/MD) record (never an OS file) ...
+# It replaces the old OS-level mvpkg.installed manifest" (udt/MVPKG.LOCK.H).
+# MVPKG.HAS and MVPKG.LIST read it, and attribute 2 holds the package names as
+# parallel multivalues.
+#
+# So `rm -f mvpkg.installed` reset nothing: the state that decides whether a
+# dependency is reinstalled survived every scenario, which is why installing
+# depdemo reported "cannot resolve dependency 'demo'" and never reinstalled it.
+LOCKREC="$CLIENT/VOC/MVPKG.LOCK"
 reset_account() {
    : > "$CLIENT/PACKAGES"
-   rm -f "$CLIENT/mvpkg.installed"
+   rm -f "$LOCKREC"
+   rm -f "$CLIENT/mvpkg.installed"      # the fossil; harmless, and shipped
 }
 
 inst() { rm -rf "$MVPKG_STORE"; reset_account; RUNMVX -a "$CLIENT" -c "MVPKG install $1"; }
@@ -199,7 +210,19 @@ echo "== test 1 leaf"
 OUT="$(inst demo)"; echo "$OUT" | sed 's/^/  demo> /'
 echo "$OUT" | grep -q "installed demo 1.0"      || say "leaf not installed"
 [ -f "$MVPKG_STORE/demo/MARKER" ]                || say "leaf not unpacked to the store"
-grep -qx demo "$CLIENT/mvpkg.installed" 2>/dev/null || say "leaf not recorded in the account"
+# AND THE ASSERTION HAS TO READ THAT RECORD TOO.  This used to grep
+# mvpkg.installed, a file nothing has written since the lock record replaced
+# it -- so it could only ever pass because mv_package SHIPS that file
+# containing the single line `demo` (mv_package#168).  It has been green for
+# that reason, not because anything was recorded.
+#
+# Attribute 2, split on VM, matched exactly: `demo` must not be satisfied by
+# `depdemo`.
+locked() {
+   [ -f "$LOCKREC" ] || return 1
+   sed -n '2p' "$LOCKREC" | tr '\375' '\n' | grep -qx "$1"
+}
+locked demo || say "leaf not recorded in the account's MVPKG.LOCK"
 
 # 2. a missing package reports cleanly and records nothing
 echo "== test 2 missing"
