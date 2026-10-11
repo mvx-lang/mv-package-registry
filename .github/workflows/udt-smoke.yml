@@ -41,8 +41,23 @@ jobs:
 
       - name: The build toolchain is present in the container
         shell: bash
-        # shellcheck disable=SC2016  # $UDTHOME is expanded inside the container by udt-run, not here
         run: |
+          # $UDTHOME is expanded inside the container by udt-run, not here.
+          #
+          # THE DIRECTIVE HAS TO BE INSIDE THE SCRIPT.  It used to sit one line
+          # up as a YAML comment, where the linter never saw it: actionlint
+          # hands over the `run:` body alone, so a directive outside that body
+          # does nothing and SC2016 fired regardless.
+          #
+          # Two more rules about the directive itself, both learned the hard
+          # way here.  It carries NOTHING after the code -- a trailing `# ...`
+          # parses as a second directive key and fails with SC1072/SC1073, a
+          # louder error than the one being silenced.  And no OTHER comment
+          # line may begin with the linter's name, because such a line is read
+          # as a directive too: the first draft of this very comment said
+          # "# shellcheck the run: body alone" and broke the script it was
+          # explaining.
+          # shellcheck disable=SC2016
           udt-run 'set -e
             echo "UDTHOME=$UDTHOME"
             test -x "$UDTHOME/bin/udt"   && echo "udt:  ok"
