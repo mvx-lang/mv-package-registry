@@ -69,7 +69,8 @@ cleanup() {
   # Put the checkout back as it was found, including PACKAGES -- which this
   # script rewrites and which mv_package tracks in git (mv_package#168).
   [ -f "$PKGSNAP" ] && cp "$PKGSNAP" "$CLIENT/PACKAGES" 2>/dev/null
-  [ -f "$INSTSNAP" ] && cp "$INSTSNAP" "$CLIENT/mvpkg.installed" 2>/dev/null
+  if [ -f "$INSTSNAP" ]; then cp "$INSTSNAP" "$CLIENT/mvpkg.installed" 2>/dev/null
+  else rm -f "$CLIENT/mvpkg.installed"; fi
   rm -rf "$WORK"
   exit "$rc"
 }
@@ -165,16 +166,28 @@ RUNMVX() { MVXPRIV=unrestricted $TMO "$MVX" "$@" </dev/null 2>&1; }
 # order, and the leaf was never recorded in a manifest it was not reinstalled
 # into.  It cannot happen on a machine where these tests have never run.
 #
-# SNAPSHOTTED, NOT EMPTIED, because the checkout may legitimately carry entries
-# this test has no business discarding -- and restored on the way out, so a hand
-# run does not leave the checkout dirtier than it found it.
+# A CLEAN SLATE BETWEEN SCENARIOS, and the ORIGINAL restored only on the way
+# out.  Those are two different jobs and conflating them broke two tests:
+# restoring the checkout's own files between scenarios restores
+# mvpkg.installed, which mv_package SHIPS containing the single line `demo`
+# (mv_package#168).  That told MVPKG demo was already installed, so:
+#
+#   - test 3 never reinstalled it as a dependency, so "installed demo 1.0"
+#     never appeared and the ordering assertion had nothing to order
+#   - test 1 PASSED VACUOUSLY -- it asserts demo is recorded in the account,
+#     and the restored file already said so before the install ran
+#
+# The second is the worse of the two: a green assertion proving nothing.
+#
+# So between scenarios: empty PACKAGES, no manifest.  On exit: whatever was
+# there before, so a hand run leaves the checkout as it found it.
 PKGSNAP="$WORK/PACKAGES.orig"
 INSTSNAP="$WORK/installed.orig"
 if [ -f "$CLIENT/PACKAGES" ]; then cp "$CLIENT/PACKAGES" "$PKGSNAP"; else : > "$PKGSNAP"; fi
-if [ -f "$CLIENT/mvpkg.installed" ]; then cp "$CLIENT/mvpkg.installed" "$INSTSNAP"; else : > "$INSTSNAP"; fi
+if [ -f "$CLIENT/mvpkg.installed" ]; then cp "$CLIENT/mvpkg.installed" "$INSTSNAP"; fi
 reset_account() {
-   cp "$PKGSNAP" "$CLIENT/PACKAGES"
-   cp "$INSTSNAP" "$CLIENT/mvpkg.installed"
+   : > "$CLIENT/PACKAGES"
+   rm -f "$CLIENT/mvpkg.installed"
 }
 
 inst() { rm -rf "$MVPKG_STORE"; reset_account; RUNMVX -a "$CLIENT" -c "MVPKG install $1"; }
