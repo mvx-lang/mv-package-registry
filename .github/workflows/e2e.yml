@@ -1,0 +1,107 @@
+# mv-package-registry — the end-to-end install loop, against a PUBLISHED mvx.
+# Copyright (C) 2026 Gordon Heydon.  GPL-2.0-only (see LICENSE).
+#
+# test/run.sh is the only test here that exercises what this repo IS: a real
+# `MVPKG install` across all three repos against the index-only registry.  The
+# 95 node tests in ci.yml cover the HTTP and library surface; none of them
+# installs anything (#69).
+#
+# AGAINST THE RELEASE, NOT A BUILD.  Ports consume the published mvx, so that is
+# what the loop should be provable against -- and building mvx here would mean
+# building LLVM on a hosted runner for every run.  The release tarball carries
+# everything the loop needs: bin/mvx, lib/ with the drivers, and
+# share/mvx/system as the system account.
+#
+# NOT IN ci.yml, AND NOT ON EVERY PULL REQUEST.  This depends on two other
+# repos' HEADs, so a red run can mean "mv_package changed" rather than anything
+# here, which reads badly on an unrelated change.  It runs nightly, on demand,
+# and on a pull request that touches the resolution path it actually tests.
+name: e2e
+
+on:
+  schedule:
+    - cron: '20 3 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'server.js'
+      - 'lib/**'
+      - 'registry/**'
+      - 'test/run.sh'
+      - '.github/workflows/e2e.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  install-loop:
+    name: install-loop
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'      # the version the Dockerfile ships
+
+      - name: Check out the mv_package client
+        uses: actions/checkout@v5
+        with:
+          repository: mvx-lang/mv_package
+          path: .deps/mv_package
+
+      # THE LATEST STABLE RELEASE, resolved at run time rather than pinned: this
+      # job exists to answer "does the loop work against what a user installs",
+      # and a pin would answer it about a version nobody is installing any more.
+      # The cost is that an mvx release can turn this red -- which is the point,
+      # and why it is nightly rather than on every pull request.
+      - name: Fetch the published mvx toolchain
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(curl -fsSL \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  https://api.github.com/repos/mvx-lang/mvx/releases/latest \
+                | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                | head -1)
+          [ -n "$tag" ] || { echo "::error::could not resolve mvx's latest stable release"; exit 1; }
+          echo "mvx: $tag"
+
+          # The asset is named for the version without the leading v, and for the
+          # runner's triple.  amd64 here; the arm64 asset exists for a runner
+          # that needs it.
+          ver="${tag#v}"
+          asset="mvx-lang-$ver-linux-amd64.tar.gz"
+          mkdir -p .deps/mvx
+          gh release download "$tag" --repo mvx-lang/mvx --pattern "$asset" --dir .deps
+          tar xzf ".deps/$asset" -C .deps/mvx
+
+          # EVERY PATH THE TEST NEEDS, ASSERTED HERE.  A tarball whose layout
+          # changed would otherwise surface as a confusing failure inside the
+          # loop rather than as "the release does not look like we expect".
+          root=".deps/mvx/mvx-lang"
+          for p in "$root/bin/mvx" "$root/lib" "$root/share/mvx/system"; do
+            [ -e "$p" ] || { echo "::error::the mvx release has no $p"; exit 1; }
+          done
+          {
+            echo "MVX=$PWD/$root/bin/mvx"
+            echo "MVX_DRIVERS=$PWD/$root/lib"
+            echo "MVXSYSTEM=$PWD/$root/share/mvx/system"
+            echo "MV_PACKAGE_DIR=$PWD/.deps/mv_package"
+          } >> "$GITHUB_ENV"
+
+      # ASSERT IT RAN, not merely that it exited 0.  run.sh prints
+      # "PASS: end-to-end install loop" as its last line and exits non-zero on
+      # any failure -- but a script that fell over early could also exit 0 in
+      # some future edit, and the whole of #67 is about not trusting that.
+      - name: Run the install loop
+        run: |
+          set -euo pipefail
+          sh test/run.sh 2>&1 | tee /tmp/e2e.log
+          grep -q "PASS: end-to-end install loop" /tmp/e2e.log || {
+            echo "::error::the loop did not report PASS"
+            exit 1
+          }
