@@ -4,6 +4,13 @@
 #
 #   MVX_HOME=/path/to/mvx-lang MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
 #
+# or against an INSTALLED mvx rather than a built checkout -- which is how CI
+# runs it, and what a user actually has:
+#
+#   MVX=.../mvx-lang/bin/mvx MVX_DRIVERS=.../mvx-lang/lib \
+#   MVXSYSTEM=.../mvx-lang/share/mvx/system \
+#   MV_PACKAGE_DIR=/path/to/mv_package ./test/run.sh
+#
 # Proves the whole loop across all three repos against the *index-only* registry
 # (it hosts nothing; a package's tarball is an external URL).  We stand up a
 # local static file server for the fixture tarballs, seed the registry index to
@@ -14,14 +21,37 @@
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"                       # this registry repo
-: "${MVX_HOME:?set MVX_HOME to your mvx-lang checkout (with a built toolchain)}"
 : "${MV_PACKAGE_DIR:?set MV_PACKAGE_DIR to your mv_package (client) checkout}"
-MVX="$MVX_HOME/build/bin/mvx"
+
+# A BUILT CHECKOUT OR AN INSTALLED RELEASE, and the three paths differ:
+#
+#   build       $MVX_HOME/build/{bin/mvx,lib,system}
+#   release     <root>/mvx-lang/{bin/mvx,lib,share/mvx/system}
+#
+# So each is overridable and MVX_HOME is only the default -- which is exactly
+# what mv_package's own build.sh does (MVX / MVX_DRIVERS / MVXSYSTEM), and the
+# point of matching it is that one invocation can drive both.
+#
+# IT MATTERS WHICH ONE IS TESTED.  Ports consume the PUBLISHED release, so the
+# install loop should be provable against that and not only against a developer's
+# build tree -- which was the only thing it could run against before (#69).
+MVX="${MVX:-${MVX_HOME:+$MVX_HOME/build/bin/mvx}}"
+MVX_DRIVERS="${MVX_DRIVERS:-${MVX_HOME:+$MVX_HOME/build/lib}}"
+MVXSYSTEM="${MVXSYSTEM:-${MVX_HOME:+$MVX_HOME/build/system}}"
+export MVX_DRIVERS MVXSYSTEM
 CLIENT="$MV_PACKAGE_DIR"
-[ -x "$MVX" ] || { echo "mvx not found under $MVX_HOME/build/bin" >&2; exit 1; }
+
+[ -n "$MVX" ] || { echo "set \$MVX (or MVX_HOME) to an mvx binary" >&2; exit 1; }
+[ -x "$MVX" ] || { echo "no mvx at '$MVX'" >&2; exit 1; }
+[ -d "$MVX_DRIVERS" ] || { echo "no driver directory at '$MVX_DRIVERS'" >&2; exit 1; }
+[ -d "$MVXSYSTEM" ] || { echo "no system account at '$MVXSYSTEM'" >&2; exit 1; }
 [ -x "$CLIENT/build.sh" ] || { echo "mv_package client not found at $CLIENT" >&2; exit 1; }
-command -v node >/dev/null 2>&1 || { echo "node not found; skipping" >&2; exit 0; }
-export MVX_DRIVERS="$MVX_HOME/build/lib"
+
+# NODE IS REQUIRED, AND A MISSING ONE IS A FAILURE.  This used to `exit 0` --
+# "node not found; skipping" -- which in CI is a green job that tested nothing,
+# and by hand is an answer that looks like a pass.  Nothing here can run without
+# node: it serves the fixtures, it is the registry, and it writes the index.
+command -v node >/dev/null 2>&1 || { echo "node not found; it is required" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 REGDIR="$WORK/index"; mkdir -p "$REGDIR"             # the registry's package index
@@ -78,7 +108,11 @@ MVPKG_REGISTRY_DIR="$REGDIR" node "$ROOT/server.js" "$REGPORT" >"$WORK/reg.log" 
 REGPID=$!
 sleep 1
 export MVPKG_REGISTRY="http://127.0.0.1:$REGPORT"
-MVX_HOME="$MVX_HOME" "$CLIENT/build.sh" >/dev/null
+# Hand the client the SAME toolchain this script resolved, rather than
+# MVX_HOME alone -- otherwise a release-based run builds the client against
+# whatever `mvx` happens to be on PATH, or nothing.
+MVX="$MVX" MVX_DRIVERS="$MVX_DRIVERS" MVXSYSTEM="$MVXSYSTEM" \
+  "$CLIENT/build.sh" >/dev/null
 
 # each install starts fresh (empty store + account manifest) so every package is
 # genuinely downloaded/built/linked and prints "installed <name> <ver>".
