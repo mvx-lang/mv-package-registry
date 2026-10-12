@@ -1,0 +1,52 @@
+# The published interface of this repo's composite actions.
+# CHECKED, NOT DECORATIVE: json and mapfield resolve these at
+# @main, so a renamed or newly-required input breaks their CI on a
+# change they did not make.  Regenerate deliberately with
+#   python3 test/check-actions.py --update
+# and let the diff say what moved.
+jbase-build:
+  optional:
+  - artifact
+  - image
+  - repository
+  - token
+  required:
+  - package
+mv-package-test:
+  optional:
+  - account
+  required:
+  - cases
+  - platform
+  - sources
+  - test
+setup-jbase:
+  optional:
+  - image
+  required: []
+setup-udt:
+  optional:
+  - image
+  - ud83
+  required: []
+setup-uv:
+  optional:
+  - image
+  - media
+  required: []
+udt-build:
+  optional:
+  - artifact
+  - image
+  - repository
+  - token
+  required:
+  - package
+uv-build:
+  optional:
+  - artifact
+  - image
+  - repository
+  - token
+  required:
+  - package
