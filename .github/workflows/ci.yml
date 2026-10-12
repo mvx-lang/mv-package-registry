@@ -118,6 +118,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # THE INTERFACE CONSUMERS DEPEND ON.  The parse step below catches a
+      # definition that will not load; this catches the two things that parse
+      # perfectly and still break someone else.
+      #
+      # WHY IT IS NOT actionlint: actionlint does NOT lint a standalone
+      # action.yml -- measured in #70, where a reference to a nonexistent input
+      # went unreported -- and json and mapfield cannot catch it either, because
+      # they resolve these at @main and actionlint only follows LOCAL
+      # references.  This repo is the only place it can be checked (#72).
+      - name: The actions' interfaces are intact
+        run: |
+          set -euo pipefail
+          pip3 install --quiet pyyaml
+          python3 test/check-actions.py
+
       - name: Every workflow and action definition parses
         run: |
           set -euo pipefail
