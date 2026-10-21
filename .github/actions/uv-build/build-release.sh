@@ -72,13 +72,51 @@ rm -rf dist && mkdir -p dist && sh build-uv.sh /pkg/dist'
 [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ] || {
   echo "::error::build-uv.sh produced no dist/ tree" >&2; exit 1; }
 
+# WHICH SHAPE DID build-uv.sh STAGE?  Computed once, because both the stamper
+# and the tar below need the answer: a single top-level DIRECTORY is an
+# account-shaped package (the manifests live inside it), anything else is the
+# legacy flat layout (they live at the root).
+n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
+if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
+  STAMPDIR="dist/$one_top"
+else
+  STAMPDIR="dist"
+fi
+
+# THE ARTIFACT NAMES THE RELEASE IT IS, not whatever the package last committed
+# (mvx#363).  build-uv.sh copies PKG and mvpkg.json out of the checkout, where the
+# version is whatever was last committed -- only the artifact FILENAME ever took
+# it from the tag.  That is how cmd 1.4.1's asset declared 1.3.0, getopt 1.1.1's
+# declared 1.0, and curl-cmd shipped 1.0.0 twice.  udt-build has stamped since
+# #62; these two arms did not.
+#
+# REFUSED RATHER THAN SHIPPED WRONG.  The stamper is Python and this is a
+# self-hosted runner; if it cannot run, the release stops here.  An artifact
+# that lies about its own version is worse than one that was not built -- it
+# installs, and then every version comparison about it is wrong.
+if [ -n "${STAMPER:-}" ] && [ -f "$STAMPER" ]; then
+  command -v python3 >/dev/null 2>&1 || {
+    echo "::error::python3 is needed to stamp the manifest, and is not on this runner" >&2
+    exit 1; }
+  python3 "$STAMPER" "$STAMPDIR" "$VER"
+  if [ -f "$STAMPDIR/PKG" ]; then
+    got="$(sed -n 2p "$STAMPDIR/PKG")"
+    [ "$got" = "$VER" ] || {
+      echo "::error::PKG line 2 is '$got' after stamping, expected '$VER'" >&2
+      exit 1; }
+  fi
+else
+  echo "::error::no manifest stamper supplied (set STAMPER); refusing to publish an artifact that would name the wrong version" >&2
+  exit 1
+fi
+
 TARBALL="${BASE}.tar.gz"
 # If build-uv.sh staged a SINGLE top-level directory (an account-shaped package,
 # e.g. git/), tar it BY NAME so entries are "<dir>/..." with no "./" prefix — the
 # release unpacks to that named account dir, and MVPKG strips the one leading
 # component on install.  Otherwise tar the contents at the root (legacy layout,
-# "./..." entries, which MVPKG leaves unstripped).
-n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
+# "./..." entries, which MVPKG leaves unstripped).  n_top/one_top come from the
+# shape check above rather than being recomputed.
 if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
   tar czf "$TARBALL" -C dist "$one_top"
 else

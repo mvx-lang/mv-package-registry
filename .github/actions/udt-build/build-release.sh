@@ -75,6 +75,17 @@ rm -rf dist && mkdir -p dist && sh build-udt.sh /pkg/dist'
 [ -d dist ] && [ -n "$(ls -A dist 2>/dev/null)" ] || {
   echo "::error::build-udt.sh produced no dist/ tree" >&2; exit 1; }
 
+# WHICH SHAPE DID build-udt.sh STAGE?  Computed once, because both the stamper
+# and the tar below need the answer: a single top-level DIRECTORY is an
+# account-shaped package (the manifests live inside it), anything else is the
+# legacy flat layout (they live at the root).
+n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
+if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
+  STAMPDIR="dist/$one_top"
+else
+  STAMPDIR="dist"
+fi
+
 # THE STAGED TREE HAS TO SAY WHAT THIS RELEASE IS (#62).  build-udt.sh copies
 # PKG and mvpkg.json out of the checkout, where the version is whatever was last
 # committed -- only the artifact FILENAME ever took it from the tag.  So cmd
@@ -88,12 +99,6 @@ if [ -n "${STAMPER:-}" ] && [ -f "$STAMPER" ]; then
   command -v python3 >/dev/null 2>&1 || {
     echo "::error::python3 is needed to stamp the manifest, and is not on this runner" >&2
     exit 1; }
-  n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
-  if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
-    STAMPDIR="dist/$one_top"
-  else
-    STAMPDIR="dist"
-  fi
   python3 "$STAMPER" "$STAMPDIR" "$VER"
   if [ -f "$STAMPDIR/PKG" ]; then
     got="$(sed -n 2p "$STAMPDIR/PKG")"
@@ -111,8 +116,8 @@ TARBALL="${BASE}.tar.gz"
 # e.g. git/), tar it BY NAME so entries are "<dir>/..." with no "./" prefix — the
 # release unpacks to that named account dir, and MVPKG strips the one leading
 # component on install.  Otherwise tar the contents at the root (legacy layout,
-# "./..." entries, which MVPKG leaves unstripped).
-n_top="$(ls -A dist | wc -l)"; one_top="$(ls -A dist | head -1)"
+# "./..." entries, which MVPKG leaves unstripped).  n_top/one_top come from the
+# shape check above rather than being recomputed.
 if [ "$n_top" -eq 1 ] && [ -d "dist/$one_top" ]; then
   tar czf "$TARBALL" -C dist "$one_top"
 else
